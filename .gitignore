@@ -1,0 +1,153 @@
+# ===============================================
+# ARQUIVOS SENSÍVEIS - NUNCA VERSIONAR
+# ===============================================
+.env
+.env.local
+.env.production
+.env.staging
+.env.development
+*.key
+*.pem
+secrets.json
+credentials.json
+
+# ===============================================
+# PYTHON - CACHE E COMPILADOS
+# ===============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribuição / empacotamento
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# ===============================================
+# AMBIENTES VIRTUAIS
+# ===============================================
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# ===============================================
+# TESTES E COBERTURA
+# ===============================================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# ===============================================
+# LOGS E DADOS TEMPORÁRIOS
+# ===============================================
+*.log
+*.tmp
+*.temp
+*.bak
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ===============================================
+# IDEs E EDITORES
+# ===============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.spyderproject
+.spyproject
+.ropeproject
+
+# ===============================================
+# SISTEMA OPERACIONAL
+# ===============================================
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+
+# ===============================================
+# ARQUIVOS ESPECÍFICOS DO PROJETO G-CLICK
+# ===============================================
+# Estado das notificações (contém dados sensíveis)
+storage/notification_state.json
+
+# Métricas e logs do sistema
+storage/metrics/*.jsonl
+analytics/reports/*.csv
+reports/exports/*.csv
+
+# Cache de tokens e sessões
+storage/cache/
+*.session
+
+# Arquivos de backup
+*.backup
+backup_*
+
+# ===============================================
+# DOCUMENTAÇÃO E DESENVOLVIMENTO
+# ===============================================
+docs/_build/
+site/
+
+# Jupyter Notebooks (checkpoints)
+.ipynb_checkpoints
+
+# ===============================================
+# DEPENDÊNCIAS E LOCK FILES (OPCIONAL)
+# ===============================================
+# Descomente se quiser ignorar arquivos de lock
+# Pipfile.lock
+# poetry.lock
+# requirements-dev.txt

@@ -1,0 +1,14 @@
+notificacao:
+  dias_proximos: 3
+  page_size: 50
+  max_responsaveis_lookup: 40
+  limite_responsaveis_notificar: 30
+  intervalo_loop_segundos: 600   # usado no notify_loop
+  rate_limit_sleep_ms: 150       # pausa entre chamadas de /responsaveis
+  repetir_no_mesmo_dia: false    # se true, ignora cache diário e envia sempre
+  detalhar_limite: 5             # quantas tarefas listar antes de resumir "X tarefas..."
+  categoria_padrao: "Obrigacao"
+  enviar_resumo_global: true
+logs:
+  level: INFO
+  debug_http: false

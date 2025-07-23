@@ -1,0 +1,32 @@
+notificacoes:
+  simulacao:
+    modo: CANAL_UNICO            # Outras opções futuras: DM, BOT
+    mencao_simulada: true
+    forcar_responsavel_teste: "eliels.glip"
+    email_teste: "eliel@glip.com.br"
+
+  individuais:
+    habilitado: true
+    modo_selecao: WHITELIST      # WHITELIST | ALL
+    whitelist:                   # Pode usar IDs (int) ou apelidos (string)
+      - "eliels.glip"
+
+  vencidas:
+    habilitado: false            # (Opcional ativar depois p/ canal)
+
+  limites:
+    max_tarefas_por_responsavel: 50
+    max_vencidas_busca: 200
+
+  filtros_busca:
+    categoria: "Obrigacao"
+    dias_proximos: 3
+    incluir_vencidas: false
+
+  links:
+    base_tarefa: "https://app.gclick.com.br/tarefas/{id}"
+    lista_pendentes: "https://app.gclick.com.br/tarefas?meusPendentes=true"
+
+  formato:
+    limite_detalhe: 3            # <=3 mostra detalhado, >3 vira agregada
+    incluir_status_label: true

@@ -1,0 +1,20 @@
+{
+  "generated_at": "2025-07-20T15:19:00.898493+00:00",
+  "days": {
+    "2025-07-20": {
+      "open_total": 60,
+      "vencidas": 0,
+      "vence_hoje": 0,
+      "vence_proximos": 60,
+      "runs": 3,
+      "run_ids": [
+        "notify_20250720T151723Z_88ae99",
+        "notify_20250720T151807Z_bb4b40",
+        "notify_20250720T151826Z_205c1f"
+      ],
+      "pct_vencidas": 0.0,
+      "open_7d_avg": 60.0,
+      "anomalia_flag": false
+    }
+  }
+}

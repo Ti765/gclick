@@ -1,0 +1,6 @@
+# Lista de feriados customizados (YYYY-MM-DD)
+# Ajuste conforme política interna (quais dias considerar "sem operação")
+feriados:
+  - 2025-01-01
+  - 2025-04-21
+  - 2025-05-01
