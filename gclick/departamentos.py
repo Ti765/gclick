@@ -1,9 +1,13 @@
 # gclick/departamentos.py
 import requests
+import time
 from typing import List, Dict, Any
 from .auth import get_access_token
 
 BASE = "https://api.gclick.com.br"
+
+# Cache simples em memória
+_cache_departamentos = {"data": None, "timestamp": 0, "ttl": 3600}  # 1 hora
 
 def listar_departamentos(page: int = 0, size: int = 100) -> List[Dict[str, Any]]:
     token = get_access_token()
@@ -16,3 +20,20 @@ def listar_departamentos(page: int = 0, size: int = 100) -> List[Dict[str, Any]]
     data = resp.json()
     content = data.get("content", [])
     return content
+
+def get_departamentos_cached() -> List[Dict[str, Any]]:
+    """Retorna departamentos com cache de 1 hora"""
+    now = time.time()
+    cache = _cache_departamentos
+    
+    if cache["data"] is None or (now - cache["timestamp"]) > cache["ttl"]:
+        try:
+            cache["data"] = listar_departamentos(size=500)  # Buscar todos
+            cache["timestamp"] = now
+            print(f"Cache de departamentos atualizado: {len(cache['data'])} itens")
+        except Exception as e:
+            print(f"Erro ao cachear departamentos: {e}")
+            if cache["data"] is None:
+                cache["data"] = []
+    
+    return cache["data"]

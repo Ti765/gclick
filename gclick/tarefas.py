@@ -1,7 +1,8 @@
 import os
 import requests
 from datetime import datetime, timedelta
-from typing import Tuple, List, Dict, Any, Iterable
+from typing import Tuple, List, Dict, Any, Iterable, Optional
+from .auth import get_access_token  # Usar auth centralizado
 
 # Carrega .env defensivamente (não falha se não existir)
 try:
@@ -10,48 +11,8 @@ try:
 except Exception:
     pass
 
-REQUIRED_ENV = ["GCLICK_CLIENT_ID", "GCLICK_CLIENT_SECRET"]
-
-def _ensure_env():
-    faltando = [k for k in REQUIRED_ENV if not os.getenv(k)]
-    if faltando:
-        raise RuntimeError(
-            f"[ENV] Variáveis ausentes: {', '.join(faltando)}. "
-            "Carregue seu .env antes de importar gclick.tarefas ou defina-as no ambiente."
-        )
-
-# ============================================================
-# Autenticação com cache simples
-# ============================================================
-
-_token_cache: Dict[str, Any] = {"value": None, "exp": None}
-
-def _obter_token() -> Tuple[str, datetime]:
-    _ensure_env()
-    url = "https://api.gclick.com.br/oauth/token"
-    payload = {
-        "grant_type": "client_credentials",
-        "client_id": os.environ["GCLICK_CLIENT_ID"],
-        "client_secret": os.environ["GCLICK_CLIENT_SECRET"],
-    }
-    resp = requests.post(url, data=payload, timeout=25)
-    resp.raise_for_status()
-    data = resp.json()
-    tok = data["access_token"]
-    exp = datetime.utcnow() + timedelta(seconds=int(data.get("expires_in", 3600)) - 60)
-    return tok, exp
-
-def _get_access_token() -> str:
-    now = datetime.utcnow()
-    if _token_cache["value"] and _token_cache["exp"] and _token_cache["exp"] > now:
-        return _token_cache["value"]
-    tok, exp = _obter_token()
-    _token_cache["value"] = tok
-    _token_cache["exp"] = exp
-    return tok
-
 def _headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {_get_access_token()}"}
+    return {"Authorization": f"Bearer {get_access_token()}"}
 
 # ============================================================
 # Status labels
@@ -77,6 +38,36 @@ def normalizar_tarefa(t: Dict[str, Any]) -> Dict[str, Any]:
     r = dict(t)
     st = r.get("status")
     r["_statusLabel"] = STATUS_LABELS.get(st, st)
+    
+    # Normalizar data de vencimento
+    dv = r.get("dataVencimento")
+    if dv and isinstance(dv, str):
+        try:
+            # Assumindo formato ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:mm:ss)
+            from datetime import datetime
+            if 'T' in dv:
+                # Formato com tempo
+                r["_dt_dataVencimento"] = datetime.fromisoformat(dv.replace('Z', '')).date()
+            else:
+                # Apenas data
+                r["_dt_dataVencimento"] = datetime.fromisoformat(dv).date()
+        except ValueError:
+            try:
+                # Tentar outros formatos comuns
+                from datetime import datetime
+                r["_dt_dataVencimento"] = datetime.strptime(dv[:10], "%Y-%m-%d").date()
+            except ValueError:
+                print(f"[WARN] Formato de data não reconhecido: {dv}")
+                r["_dt_dataVencimento"] = None
+    else:
+        r["_dt_dataVencimento"] = None
+    
+    # Normalizar outros campos importantes que podem vir como None
+    if not r.get("nome") and r.get("assunto"):
+        r["nome"] = r.get("assunto")
+    elif not r.get("assunto") and r.get("nome"):
+        r["assunto"] = r.get("nome")
+    
     return r
 
 # ============================================================
@@ -87,10 +78,10 @@ def listar_tarefas_page(
     categoria: str = "Obrigacao",
     page: int = 0,
     size: int = 20,
-    status: str | None = None,
-    dataVencimentoInicio: str | None = None,
-    dataVencimentoFim: str | None = None,
-    extra_params: Dict[str, Any] | None = None,
+    status: Optional[str] = None,
+    dataVencimentoInicio: Optional[str] = None,
+    dataVencimentoFim: Optional[str] = None,
+    extra_params: Optional[Dict[str, Any]] = None,
     validar_filtro_status: bool = False,
     divergencia_limite: float = 0.8,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:

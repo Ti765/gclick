@@ -1,16 +1,37 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 from dotenv import load_dotenv
-from datetime import date
+from datetime import date, timedelta
 from gclick.tarefas import (
     listar_tarefas_page,
-    coletar_tarefas_intervalo,
-    STATUS_LABEL
+    listar_tarefas_abertas_intervalo,  # Função que existe
+    STATUS_LABELS  # Corrigido de STATUS_LABEL
 )
 from gclick.responsaveis import listar_responsaveis_tarefa
-from gclick.departamentos import get_departamentos_cached
+from gclick.departamentos import get_departamentos_cached  # Usar cache existente
 from teams.webhook import enviar_teams_mensagem
 import json
 
 load_dotenv()
+
+def coletar_tarefas_intervalo(categoria="Obrigacao", limite_itens=50, dias_vencimento_proximos=3):
+    """Implementação baseada na função existente"""
+    hoje = date.today()
+    fim = hoje + timedelta(days=dias_vencimento_proximos)
+    
+    try:
+        tarefas, meta = listar_tarefas_abertas_intervalo(
+            inicio=hoje.isoformat(),
+            fim=fim.isoformat(),
+            categoria=categoria,
+            page_size=min(limite_itens, 200)
+        )
+        return tarefas[:limite_itens]
+    except Exception as e:
+        print(f"Erro ao coletar tarefas por intervalo: {e}")
+        return []
 
 
 def sanitize_for_print(obj: dict) -> dict:
