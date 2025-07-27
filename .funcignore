@@ -1,0 +1,38 @@
+# Ignore tudo que não interessa no deploy do Azure Function
+.git*
+.vscode
+.idea
+__azurite_db*__.json
+__blobstorage__
+__queuestorage__
+local.settings.json
+test/
+tests/
+.env
+.venv
+venv/
+ENV/
+env/
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.python_packages/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+backup_*
+*.backup
+docs/
+site/
+.ipynb_checkpoints
+*.ipynb
+# Ignore arquivos de dados e métricas
+storage/
+analytics/
+reports/
+# Ignore configs/archives que não fazem sentido no deploy (ajuste se sua function lê config do Azure, não local)
+config/*.yaml

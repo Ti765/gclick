@@ -1,0 +1,20 @@
+# Dependências principais do projeto G-Click
+requests>=2.25.0
+PyYAML>=6.0
+python-dotenv>=0.19.0
+backoff>=1.11.1
+python-dateutil>=2.8.2
+
+# Azure Functions Core
+azure-functions>=1.17.0
+
+# Bot Framework
+botbuilder-core>=4.14.0
+botbuilder-schema>=4.14.0
+botframework-connector>=4.14.0
+
+# HTTP Client assíncrono
+aiohttp>=3.8.1
+
+# Logging e utilitários
+python-json-logger>=2.0.0

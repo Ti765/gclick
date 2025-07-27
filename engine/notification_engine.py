@@ -20,6 +20,27 @@ except ImportError:  # Fallback se ainda não implementado
     def new_run_id(prefix: str = 'run'):  # type: ignore
         return f"{prefix}_dummy"
 
+# ================= INTEGRAÇÃO COM BOT ADAPTER =================
+# Tente importar o adapter, conversation_references e BotSender.
+bot_sender = None
+adapter = None
+conversation_references = None
+
+try:
+    # Altere o caminho do import se estiver em outro local!
+    from teams.bot_sender import BotSender, mapear_apelido_para_teams_id
+    # Note: adapter e conversation_references serão definidos pela function_app.py
+    # quando o bot estiver ativo. Por enquanto, manteremos como None.
+    import logging
+    logging.info("[ENGINE] Bot sender imports disponíveis")
+except ImportError as e:
+    # Se falhar, segue só com webhook (até ajustar)
+    import logging
+    logging.warning(f"[BOT] Falha ao importar BotSender: {e}")
+    
+    def mapear_apelido_para_teams_id(apelido: str):
+        return None
+
 STATUS_ABERTOS = {"A", "P", "Q", "S"}
 ALERT_ZERO_ABERTOS_TO_TEAMS = os.getenv("ALERT_ZERO_ABERTOS_TO_TEAMS", "false").lower() in ("1", "true", "yes")
 
@@ -329,14 +350,43 @@ def run_notification_cycle(
             print(f"[{apelido}]\n{msg}")
         print(f"[INFO] DRY-RUN concluído. (responsáveis selecionados={len(mensagens_enviadas)})")
     else:
+        # Primeiro, envia o resumo global (opcional)
         if resumo_global_msg:
             try:
-                enviar_teams_mensagem(resumo_global_msg)
+                if bot_sender:
+                    # Envie para um canal específico ou admin, se quiser, usando o bot.
+                    logging.info("[BOT] Resumo global pronto para envio (adapte para enviar em canal, se desejar).")
+                else:
+                    enviar_teams_mensagem(resumo_global_msg)
             except Exception as e:
                 print(f"[WARN] Falha envio resumo global: {e}")
+        
+        # Depois, envia individualmente:
         for apelido, key, msg in mensagens_enviadas:
             try:
-                enviar_teams_mensagem(f"{apelido}:\n{msg}")
+                mensagem_enviada = False
+                
+                # Tenta enviar via bot primeiro (se disponível)
+                if bot_sender:
+                    teams_id = mapear_apelido_para_teams_id(apelido)
+                    if teams_id:
+                        try:
+                            import asyncio
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                asyncio.ensure_future(bot_sender.send_message(teams_id, msg))
+                            else:
+                                loop.run_until_complete(bot_sender.send_message(teams_id, msg))
+                            mensagem_enviada = True
+                            logging.info(f"[BOT] Enviado para {apelido} (teams_id: {teams_id})")
+                        except Exception as bot_error:
+                            logging.warning(f"[BOT] Falha para {apelido}: {bot_error}")
+                
+                # Fallback para webhook se bot falhou ou não está disponível
+                if not mensagem_enviada:
+                    enviar_teams_mensagem(f"{apelido}:\n{msg}")
+                    logging.info(f"[WEBHOOK] Enviado para {apelido}")
+                
                 register_sent(key)
                 if verbose:
                     print(f"[ENVIADO] {apelido} ({key})")
@@ -344,6 +394,7 @@ def run_notification_cycle(
                     time.sleep(rate_limit_sleep_ms / 1000.0)
             except Exception as e:
                 print(f"[ERRO_ENVIO] {apelido}: {e}")
+                logging.error(f"[ERRO_ENVIO] {apelido}: {e}")
 
     # 8. Estatísticas finais
     counts_final = {
@@ -464,4 +515,24 @@ def ciclo_notificacao(
         registrar_metricas=registrar_metricas,
         alertar_se_zero_abertos=alertar_se_zero_abertos,
         run_reason='legacy_wrapper'
+    )
+
+
+def run_cycle(simulacao: bool = False):
+    """
+    Wrapper para compatibilidade com Azure Function.
+    
+    Args:
+        simulacao: Se True, executa em modo dry_run sem enviar notificações reais
+        
+    Returns:
+        Dict com resultados do ciclo de notificação
+    """
+    modo = "dry_run" if simulacao else "live"
+    return run_notification_cycle(
+        execution_mode=modo,
+        run_reason="azure_function",
+        registrar_metricas=True,
+        alertar_se_zero_abertos=True,
+        verbose=True
     )

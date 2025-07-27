@@ -1,26 +1,27 @@
-# ===============================================
-# ARQUIVOS SENSÍVEIS - NUNCA VERSIONAR
-# ===============================================
+# =============== SENSITIVE FILES ===============
 .env
-.env.local
-.env.production
-.env.staging
-.env.development
+.env.*
 *.key
 *.pem
 secrets.json
 credentials.json
 
-# ===============================================
-# PYTHON - CACHE E COMPILADOS
-# ===============================================
+# =============== AZURE FUNCTIONS ===============
+azure_functions/local.settings.json
+azure_functions/.azure/
+azure_functions/.vscode/
+azure_functions/bin/
+azure_functions/obj/
+azure_functions/.funcignore
+
+# =============== PYTHON CACHE ===============
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 
-# Distribuição / empacotamento
+# =============== DISTRIBUTION/BUILD ===============
 build/
 develop-eggs/
 dist/
@@ -39,14 +40,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
-# PyInstaller
 *.manifest
 *.spec
 
-# ===============================================
-# AMBIENTES VIRTUAIS
-# ===============================================
+# =============== VIRTUAL ENVS ===============
 .venv/
 venv/
 env/
@@ -55,9 +52,7 @@ env.bak/
 venv.bak/
 .python-version
 
-# ===============================================
-# TESTES E COBERTURA
-# ===============================================
+# =============== TESTS & COVERAGE ===============
 htmlcov/
 .tox/
 .nox/
@@ -75,9 +70,7 @@ coverage.xml
 dmypy.json
 .pyre/
 
-# ===============================================
-# LOGS E DADOS TEMPORÁRIOS
-# ===============================================
+# =============== LOGS & TEMP DATA ===============
 *.log
 *.tmp
 *.temp
@@ -85,9 +78,7 @@ dmypy.json
 pip-log.txt
 pip-delete-this-directory.txt
 
-# ===============================================
-# IDEs E EDITORES
-# ===============================================
+# =============== IDEs & EDITORS ===============
 .vscode/
 .idea/
 *.swp
@@ -97,57 +88,57 @@ pip-delete-this-directory.txt
 .spyproject
 .ropeproject
 
-# ===============================================
-# SISTEMA OPERACIONAL
-# ===============================================
+# =============== OS FILES ===============
 # Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
-
 # macOS
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
-
 # Linux
 *~
 
-# ===============================================
-# ARQUIVOS ESPECÍFICOS DO PROJETO G-CLICK
-# ===============================================
-# Estado das notificações (contém dados sensíveis)
+# =============== GCLICK PROJECT SPECIFIC ===============
+# Notificação e cache
 storage/notification_state.json
+storage/cache/
+*.session
 
-# Métricas e logs do sistema
+# Métricas e relatórios
 storage/metrics/*.jsonl
 analytics/reports/*.csv
 reports/exports/*.csv
 
-# Cache de tokens e sessões
-storage/cache/
-*.session
-
-# Arquivos de backup
+# Backup e arquivos temporários
 *.backup
 backup_*
+*.tmp
+*.temp
 
-# ===============================================
-# DOCUMENTAÇÃO E DESENVOLVIMENTO
-# ===============================================
+# Documentação & notebooks
 docs/_build/
 site/
-
-# Jupyter Notebooks (checkpoints)
 .ipynb_checkpoints
 
-# ===============================================
-# DEPENDÊNCIAS E LOCK FILES (OPCIONAL)
-# ===============================================
-# Descomente se quiser ignorar arquivos de lock
+# Azure/Function Artifacts (não versionar configs locais/sensíveis)
+bin/
+obj/
+local.settings.json
+
+# Azurite/local emulador artifacts
+__blobstorage__
+__queuestorage__
+__azurite_db*__.json
+
+# Python packages do Azure (local)
+.python_packages/
+
+# (Descomente abaixo se não quiser versionar locks do pip)
 # Pipfile.lock
 # poetry.lock
 # requirements-dev.txt

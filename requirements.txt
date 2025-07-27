@@ -1,5 +1,0 @@
-requests
-PyYAML
-python-dotenv
-backoff
-python-dateutil
