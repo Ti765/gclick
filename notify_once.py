@@ -13,10 +13,18 @@ Desligar filtro de status abertos (examinar tudo):
 """
 from __future__ import annotations
 import argparse
+import logging
 import sys
 from engine.notification_engine import run_notification_cycle
 from analytics.metrics import new_run_id
 from storage.lock import FileLock
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,16 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def validar_args(args: argparse.Namespace):
     if args.enviar and args.dry_run:
-        print("[ERRO] Use apenas um dos modos: ou --enviar (live) ou --dry-run (dry-run forçado).")
+        logger.error("Use apenas um dos modos: ou --enviar (live) ou --dry-run (dry-run forçado).")
         sys.exit(2)
     if args.dias_proximos < 0:
-        print("[ERRO] --dias-proximos deve ser >= 0.")
+        logger.error("--dias-proximos deve ser >= 0.")
         sys.exit(2)
     if args.page_size <= 0:
-        print("[ERRO] --page-size deve ser > 0.")
+        logger.error("--page-size deve ser > 0.")
         sys.exit(2)
     if args.max_pages is not None and args.max_pages <= 0:
-        print("[ERRO] --max-pages deve ser None ou > 0.")
+        logger.error("--max-pages deve ser None ou > 0.")
         sys.exit(2)
 
 
@@ -89,16 +97,20 @@ def main():
         execution_mode = "dry_run"  # default ou se --dry-run foi passado
 
     if args.verbose:
-        print(f"[ARGS] {args}")
-        print(f"[MODO] execution_mode={execution_mode}")
+        logger.info(f"Argumentos: {args}")
+        logger.info(f"Modo de execução: {execution_mode}")
+        
+        # Configurar logging para DEBUG se verbose
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Modo verbose ativado")
 
     run_id = new_run_id('notify')
 
     apenas_status_abertos = not args.no_apenas_abertos
 
     if args.verbose:
-        print(f"[RUN] run_id={run_id} | janela_futura={args.dias_proximos}d "
-              f"| full_scan={not args.no_full_scan} | apenas_abertos={apenas_status_abertos}")
+        logger.info(f"Executando: run_id={run_id} | janela_futura={args.dias_proximos}d "
+                   f"| full_scan={not args.no_full_scan} | apenas_abertos={apenas_status_abertos}")
 
     with FileLock('storage/notification.lock', timeout=60):
         resultado = run_notification_cycle(
@@ -123,25 +135,25 @@ def main():
     # Resumo humano
     counts = resultado.get("counts", {})
     meta = resultado.get("meta_cycle", {})
-    print("\n===== RESUMO CICLO =====")
-    print(f"run_id: {resultado.get('run_id')}")
-    print(f"modo: {resultado.get('execution_mode')}")
+    logger.info("===== RESUMO CICLO =====")
+    logger.info(f"run_id: {resultado.get('run_id')}")
+    logger.info(f"modo: {resultado.get('execution_mode')}")
     janela = meta.get("janela")
     if janela:
-        print(f"janela: {janela[0]} -> {janela[1]}")
-    print(f"tarefas (brutas): {meta.get('tarefas_coletadas')}")
-    print(f"abertos_brutos: {meta.get('abertos_brutos')} | fechados_brutos: {meta.get('fechados_brutos')}")
-    print(f"após_filtro (open_after_filter): {resultado.get('open_after_filter')}")
-    print(f"vencidas={counts.get('vencidas')} | hoje={counts.get('vence_hoje')} | proximos={counts.get('vence_em_3_dias')}")
-    print(f"responsáveis_notificados: {counts.get('responsaveis_selecionados')} "
-          f"(lista={', '.join(resultado.get('responsaveis', []))})")
-    print(f"resumo_global_incluido: {resultado.get('resumo_global_incluido')}")
-    print(f"full_scan: {meta.get('full_scan')} | duração_s: {meta.get('duration_s')}")
-    print("=========================\n")
+        logger.info(f"janela: {janela[0]} -> {janela[1]}")
+    logger.info(f"tarefas (brutas): {meta.get('tarefas_coletadas')}")
+    logger.info(f"abertos_brutos: {meta.get('abertos_brutos')} | fechados_brutos: {meta.get('fechados_brutos')}")
+    logger.info(f"após_filtro (open_after_filter): {resultado.get('open_after_filter')}")
+    logger.info(f"vencidas={counts.get('vencidas')} | hoje={counts.get('vence_hoje')} | proximos={counts.get('vence_em_3_dias')}")
+    logger.info(f"responsáveis_notificados: {counts.get('responsaveis_selecionados')} "
+               f"(lista={', '.join(resultado.get('responsaveis', []))})")
+    logger.info(f"resumo_global_incluido: {resultado.get('resumo_global_incluido')}")
+    logger.info(f"full_scan: {meta.get('full_scan')} | duração_s: {meta.get('duration_s')}")
+    logger.info("=========================")
 
     # Dump bruto (para logs / debug)
-    print("[INFO] Resultado completo (dict):")
-    print(resultado)
+    logger.debug("Resultado completo (dict):")
+    logger.debug(resultado)
 
 
 if __name__ == "__main__":

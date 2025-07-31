@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from dotenv import load_dotenv
@@ -13,6 +14,13 @@ from gclick.responsaveis import listar_responsaveis_tarefa
 from gclick.departamentos import get_departamentos_cached  # Usar cache existente
 from teams.webhook import enviar_teams_mensagem
 import json
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -30,7 +38,7 @@ def coletar_tarefas_intervalo(categoria="Obrigacao", limite_itens=50, dias_venci
         )
         return tarefas[:limite_itens]
     except Exception as e:
-        print(f"Erro ao coletar tarefas por intervalo: {e}")
+        logger.error(f"Erro ao coletar tarefas por intervalo: {e}")
         return []
 
 

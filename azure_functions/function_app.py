@@ -1,305 +1,317 @@
-# IMPORTANTE: import azure.functions DEVE vir PRIMEIRO
+# IMPORTANTE ─ azure.functions deve ser o 1.º import
 import azure.functions as func
+
+import json
 import logging
 import os
-import json
+import sys
 from datetime import datetime
-import asyncio
-from urllib.parse import urlparse
 
-# Bot Framework (SDK Python)
-from botbuilder.core import (
-    BotFrameworkAdapterSettings,
-    BotFrameworkAdapter,
-    TurnContext,
-    ActivityHandler,
-)
-from botbuilder.schema import Activity, ConversationReference, ChannelAccount
-from botframework.connector.auth import MicrosoftAppCredentials
+# ─────────────────────────────────────────────────────────────
+# PATHS & LOG
+# ─────────────────────────────────────────────────────────────
+sys.path.append(os.path.join(os.path.dirname(__file__), "shared_code"))
 
-# Imports do projeto G-Click
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gclick_function_app")
+
+APP_VERSION = "2.1.3"
+
+# flags de ambiente
+DEBUG_MOCK = os.getenv("DEBUG_MOCK", "false").lower() == "true"
+IS_AZURE = bool(os.getenv("WEBSITE_INSTANCE_ID") or os.getenv("HOME"))
+
+# ─────────────────────────────────────────────────────────────
+# IMPORTS DO PROJETO
+# ─────────────────────────────────────────────────────────────
 try:
-    from engine.notification_engine import run_cycle
+    from teams.user_mapping import mapear_apelido_para_teams_id
     from teams.bot_sender import BotSender, ConversationReferenceStorage
-except ImportError as e:
-    logging.warning(f"Erro ao importar módulos do G-Click: {e}")
-    # Definir fallback functions se imports falharem
-    def run_cycle(simulacao=False):
-        logging.warning("run_cycle não disponível - fallback")
-        return {"status": "fallback", "simulacao": simulacao}
-    
-    class BotSender:
-        def __init__(self, *args, **kwargs):
-            pass
-        async def send_message(self, user_id, message):
-            logging.warning(f"BotSender fallback - não enviando para {user_id}")
-            return False
-    
-    class ConversationReferenceStorage:
-        def __init__(self, *args, **kwargs):
-            self.references = {}
-        def add(self, *args, **kwargs):
-            pass
+    from engine.notification_engine import run_notification_cycle
 
-# Configuração do Bot
-APP_ID = os.environ.get("MicrosoftAppId", "")
-APP_PASSWORD = os.environ.get("MicrosoftAppPassword", "")
+    logger.info("✅  Módulos do projeto importados")
+except ImportError as imp_err:
+    logger.critical(f"❌  Falha nos imports do projeto: {imp_err}")
+    raise  # aborta start para evitar host quebrado
 
-# Inicialização do adapter
-adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
-adapter = BotFrameworkAdapter(adapter_settings)
+# ─────────────────────────────────────────────────────────────
+# CONFIG AZURE FUNCTIONS APP
+# ─────────────────────────────────────────────────────────────
+app = func.FunctionApp()
 
-# Storage persistente para conversation references
-conversation_storage = ConversationReferenceStorage("storage/conversation_references.json")
+# ─────────────────────────────────────────────────────────────
+# BOT FRAMEWORK (opcional – só configura com credenciais)
+# ─────────────────────────────────────────────────────────────
+APP_ID = os.getenv("MicrosoftAppId", "")
+APP_PASSWORD = os.getenv("MicrosoftAppPassword", "")
 
-# Inicialização do bot_sender global com storage persistente
-bot_sender = BotSender(adapter, APP_ID, conversation_storage)
-
-# ============================================================
-#  Configuração do Function App
-# ============================================================
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
-
-# ============================================================
-#  Configuração adicional do bot
-# ============================================================
-APP_TYPE = os.environ.get("MicrosoftAppType", "MultiTenant").strip()
-
-# Não use MicrosoftAppTenantId quando MultiTenant.
-# Se existir no portal, remova-o para evitar confusão.
-if APP_TYPE.lower() == "multitenant" and os.environ.get("MicrosoftAppTenantId"):
-    logging.warning("MicrosoftAppTenantId está definido, mas o bot está como MultiTenant.")
-
-# ============================================================
-#  Tratamento de erro global para o adapter
-# ============================================================
-async def on_error_handler(context: TurnContext, error: Exception):
-    # Loga o stack trace
-    logging.error("on_turn_error: %s", error, exc_info=True)
-
-    # Tenta avisar o usuário do erro (pode falhar se o 401 vier nesse momento também)
+bot_sender = None
+if APP_ID and APP_PASSWORD:
     try:
-        await context.send_activity("Ops! Ocorreu um erro interno.")
-    except Exception as send_ex:
-        logging.error("Falha ao enviar mensagem de erro ao usuário: %s", send_ex, exc_info=True)
+        from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings
 
-# Registra error handler
-adapter.on_turn_error = on_error_handler
+        adapter = BotFrameworkAdapter(BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD))
 
-# ============================================================
-#  Utilitário: confiar no serviceUrl do Teams
-# ============================================================
-def trust_service_url_base(service_url: str):
-    """Confia na URL base e na URL completa do serviço do Teams.
-       Não usar expiration_time aqui (não existe no SDK)."""
-    if not service_url:
-        return
-    parsed = urlparse(service_url)
-    # Ex: https://smba.trafficmanager.net/amer/tenantid/...
-    parts = parsed.path.strip("/").split("/")
-    base_path = "/" + parts[0] if parts and parts[0] else ""
-    base_url = f"{parsed.scheme}://{parsed.netloc}{base_path}"
-
-    # Confia na base (ex: https://smba.trafficmanager.net/amer)
-    MicrosoftAppCredentials.trust_service_url(base_url)
-    # Confia na URL completa também
-    MicrosoftAppCredentials.trust_service_url(service_url.rstrip("/"))
-
-# ============================================================
-#  Bot básico (Echo) para validar fluxo
-# ============================================================
-class GClickBot(ActivityHandler):
-    """
-    Bot principal do G-Click que processa mensagens e salva referências de conversação.
-    """
-    
-    async def on_message_activity(self, turn_context: TurnContext):
-        """
-        Processa mensagens recebidas dos usuários.
-        """
-        text = turn_context.activity.text or ""
-        await turn_context.send_activity(f"Echo: {text}")
-        
-        # Salva referência para mensagens proativas futuras
-        self._save_conversation_reference(turn_context)
-
-    async def on_members_added_activity(self, members_added, turn_context: TurnContext):
-        """
-        Processa quando o bot é adicionado a uma conversa ou um novo membro entra.
-        """
-        for member in members_added:
-            if member.id != turn_context.activity.recipient.id:  # Não é o próprio bot
-                await turn_context.send_activity(
-                    "Olá! Eu sou o bot do G-Click. Estou pronto para enviar notificações sobre suas obrigações fiscais."
-                )
-        
-        # Salva referência para envios futuros
-        self._save_conversation_reference(turn_context)
-                
-    def _save_conversation_reference(self, turn_context: TurnContext):
-        """
-        Salva referência da conversa para mensagens proativas usando storage persistente.
-        """
-        # Obtém a referência da conversa
-        conversation_reference = TurnContext.get_conversation_reference(turn_context.activity)
-        
-        # Armazena usando o ID do usuário como chave
-        user_id = turn_context.activity.from_property.id
-        
-        # Usa o storage global persistente
-        conversation_storage.add(user_id, conversation_reference)
-        logging.info(f"Referência de conversa salva persistentemente para user_id={user_id}")
-
-bot = GClickBot()
-
-# ============================================================
-#  /api/messages  (Endpoint do Bot Framework)
-# ============================================================
-@app.function_name(name="Messages")
-@app.route(route="messages", methods=["POST"])
-async def messages(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Recebendo atividade do Bot Framework em /api/messages")
-    try:
-        body_bytes = req.get_body()
-        activity = Activity().deserialize(json.loads(body_bytes))
-
-        # Log de depuração do header para garantir que vem um Bearer token
-        auth_header = req.headers.get("Authorization", "") or req.headers.get("authorization", "")
-        logging.info("Authorization header (primeiros 30 chars): %s", auth_header[:30])
-
-        # Confia no serviceUrl antes de responder
-        if activity.service_url:
-            logging.info("serviceUrl recebido: %s", activity.service_url)
-            trust_service_url_base(activity.service_url)
+        # storage path
+        if IS_AZURE and os.getenv("HOME"):
+            storage_path = os.path.join(os.getenv("HOME"), "data", "conversation_references.json")
         else:
-            logging.warning("Nenhum serviceUrl encontrado no Activity.")
+            local_dir = os.path.join(os.path.dirname(__file__), "storage")
+            os.makedirs(local_dir, exist_ok=True)
+            storage_path = os.path.join(local_dir, "conversation_references.json")
+        os.makedirs(os.path.dirname(storage_path), exist_ok=True)
 
-        # process_activity é async
-        response = await adapter.process_activity(activity, auth_header, bot.on_turn)
+        conversation_storage = ConversationReferenceStorage(storage_path)
+        bot_sender = BotSender(adapter, APP_ID, conversation_storage)
 
-        # Se o adapter retornar algo (ex: InvokeResponse), devolvemos o status
-        if response:
-            return func.HttpResponse(status_code=response.status)
+        # expõe para o engine
+        import engine.notification_engine as ne
 
-        return func.HttpResponse(status_code=200)
+        ne.bot_sender = bot_sender
+        ne.adapter = adapter
+        ne.conversation_storage = conversation_storage
 
-    except Exception as e:
-        logging.exception("Erro ao processar atividade do bot")
-        # Retorna 500 para o channel; o on_turn_error já tentou responder ao usuário
-        return func.HttpResponse(f"Erro interno: {e}", status_code=500)
+        logger.info(f"🤖  BotSender configurado – storage em {storage_path}")
+    except Exception as bot_err:
+        logger.warning(f"⚠️  Bot Framework não configurado: {bot_err}")
 
-# ============================================================
-#  /api/gclick  (Webhook do seu sistema)
-#  Nesta sprint deixamos como stub. Na sprint 2: ler payload e enviar proativamente ao Teams.
-# ============================================================
+# ─────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────
+def _run_cycle(period: str, dias_proximos: int, full_scan: bool):
+    exec_mode = "live" if os.getenv("SIMULACAO", "true").lower() == "false" else "dry_run"
+    logger.info(f"⏳  run_notification_cycle({period}) → modo={exec_mode}, dias={dias_proximos}")
+    result = run_notification_cycle(
+        dias_proximos=dias_proximos,
+        execution_mode=exec_mode,
+        run_reason=f"scheduled_{period}",
+        usar_full_scan=full_scan,
+        apenas_status_abertos=True,
+    )
+    logger.info(f"✅  Ciclo {period} concluído → {result}")
+
+
+# ─────────────────────────────────────────────────────────────
+# HTTP ─ Webhook G‑Click
+# ─────────────────────────────────────────────────────────────
 @app.function_name(name="GClickWebhook")
-@app.route(route="gclick", methods=["POST"])
-async def gclick_webhook(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Webhook para enviar notificações proativas via bot.
-    """
-    logging.info("Webhook do G-Click recebido em /api/gclick")
-    
+@app.route(route="gclick", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def gclick_webhook(req: func.HttpRequest) -> func.HttpResponse:
+    logger.info("📨  /gclick webhook chamado")
     try:
-        data = req.get_json()
-    except ValueError:
-        return func.HttpResponse("Payload inválido", status_code=400)
-    
-    try:
-        # Obtém dados do payload
-        user_id = data.get("user_id")
-        mensagem = data.get("mensagem", "Notificação do G-Click")
-        
-        if not user_id:
-            logging.warning("[Webhook] Nenhum user_id fornecido no payload; nada foi enviado.")
-            return func.HttpResponse("user_id obrigatório", status_code=400)
-            
-        # Envia mensagem proativa
-        success = await bot_sender.send_message(user_id, mensagem)
-        
-        if success:
-            return func.HttpResponse("Notificação enviada com sucesso", status_code=200)
-        else:
-            return func.HttpResponse("Usuário não encontrado ou erro ao enviar", status_code=404)
-            
-    except Exception as e:
-        logging.error(f"Falha no processamento do webhook: {e}", exc_info=True)
-        return func.HttpResponse("Erro interno ao enviar notificação", status_code=500)
+        payload = req.get_json()
+        if not payload:
+            return func.HttpResponse("Payload vazio", status_code=400)
 
-# ============================================================
-#  Endpoint para debug - listar usuários com referências
-# ============================================================
-@app.function_name(name="ListUsers")
-@app.route(route="debug/users", methods=["GET"])
-def list_users(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    Lista todos os usuários que têm referências de conversação salvas.
-    """
-    try:
-        users = conversation_storage.list_users()
+        evento = payload.get("evento", "notificacao_generica")
+        responsaveis = payload.get("responsaveis", [])
+
+        enviados, falhou = 0, 0
+        for resp in responsaveis:
+            apelido = (resp.get("apelido") or "").strip()
+            if not apelido:
+                continue
+            try:
+                teams_id = mapear_apelido_para_teams_id(apelido)
+                if not teams_id:
+                    falhou += 1
+                    logger.warning(f"Mapeamento não encontrado: {apelido}")
+                    continue
+                # TODO: usar bot_sender.send_message / send_card
+                enviados += 1
+            except Exception as map_err:
+                falhou += 1
+                logger.error(f"Erro no mapeamento {apelido}: {map_err}")
+
         return func.HttpResponse(
-            json.dumps({"users": users, "count": len(users)}),
-            status_code=200,
-            headers={"Content-Type": "application/json"}
+            json.dumps(
+                {
+                    "evento": evento,
+                    "total_responsaveis": len(responsaveis),
+                    "notificacoes_enviadas": enviados,
+                    "notificacoes_falharam": falhou,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            ),
+            headers={"Content-Type": "application/json"},
         )
-    except Exception as e:
-        logging.error(f"Erro ao listar usuários: {e}")
+    except Exception as exc:
+        logger.exception("Erro no webhook")
         return func.HttpResponse("Erro interno", status_code=500)
 
-# ============================================================
-#  /api/http_trigger (endpoint antigo, mantido para debug)
-# ============================================================
-@app.function_name(name="HttpTrigger")
-@app.route(route="http_trigger", methods=["GET", "POST"])
-def http_trigger(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info("Python HTTP trigger function processed a request.")
+
+# ─────────────────────────────────────────────────────────────
+# TIMERS
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="MorningNotifications")
+@app.schedule(
+    schedule="0 0 11 * * 1-5", arg_name="timer", run_on_startup=False, use_monitor=True
+)
+def morning_notifications(timer: func.TimerRequest) -> None:
     try:
-        name = req.params.get("name")
-        if not name:
+        _run_cycle("morning", int(os.getenv("DIAS_PROXIMOS", "3")), full_scan=True)
+    except Exception:
+        logger.exception("Erro no ciclo matutino")
+
+
+@app.function_name(name="AfternoonNotifications")
+@app.schedule(
+    schedule="0 30 20 * * 1-5", arg_name="timer", run_on_startup=False, use_monitor=True
+)
+def afternoon_notifications(timer: func.TimerRequest) -> None:
+    try:
+        _run_cycle("afternoon", int(os.getenv("DIAS_PROXIMOS", "1")), full_scan=False)
+    except Exception:
+        logger.exception("Erro no ciclo vespertino")
+
+
+# ─────────────────────────────────────────────────────────────
+# HTTP ─ Teams messages (stub)
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="Messages")
+@app.route(route="messages", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def messages(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        body = req.get_json()
+        logger.info(
+            f"Teams activity recebida: {body.get('type')} de "
+            f"{body.get('from', {}).get('name')} ({body.get('from', {}).get('id')})"
+        )
+        return func.HttpResponse(
+            json.dumps(
+                {
+                    "status": "received_stub_mode",
+                    "adapter_status": "configured" if bot_sender else "not_configured",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "note": "Stub – implementar adapter.process_activity p/ processamento real",
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception:
+        logger.exception("Erro no stub /messages")
+        return func.HttpResponse("Erro interno", status_code=500)
+
+
+# ─────────────────────────────────────────────────────────────
+# HTTP ─ Listagem de usuários conhecidos
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="ListUsers")
+@app.route(route="debug/users", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def list_users(req: func.HttpRequest) -> func.HttpResponse:
+    users, source = [], "no_storage"
+    try:
+        if bot_sender:
             try:
-                req_body = req.get_json()
-                if req_body:
-                    name = req_body.get("name")
-            except (ValueError, TypeError):
-                pass
+                users = [{"id": uid} for uid in bot_sender.conversation_storage.list_users()]
+                source = "list_users"
+            except Exception as err:
+                logger.warning(f"list_users() falhou: {err}")
+                # fallback interno
+                for attr in ("_conversations", "references", "_data"):
+                    if hasattr(bot_sender.conversation_storage, attr):
+                        raw = getattr(bot_sender.conversation_storage, attr)
+                        users = [{"id": k} for k in raw] if isinstance(raw, dict) else []
+                        source = f"internal_{attr}"
+                        break
+        elif DEBUG_MOCK or not IS_AZURE:
+            users = [{"id": "mock_user_1"}, {"id": "mock_user_2"}]
+            source = "mock"
+        return func.HttpResponse(
+            json.dumps(
+                {
+                    "users": users,
+                    "count": len(users),
+                    "data_source": source,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception:
+        logger.exception("Erro em /debug/users")
+        return func.HttpResponse("Erro interno", status_code=500)
 
-        if name:
-            response_message = f"Hello, {name}. This HTTP triggered function executed successfully."
-        else:
-            response_message = (
-                "This HTTP triggered function executed successfully. "
-                "Pass a name in the query string or in the request body for a personalized response."
-            )
-        return func.HttpResponse(response_message, status_code=200)
 
-    except Exception as e:
-        logging.error("Error in HTTP trigger: %s", str(e))
-        return func.HttpResponse("Internal server error occurred.", status_code=500)
-
-# ============================================================
-#  TIMER TRIGGER (Scheduler) - Agendamento automático
-# ============================================================
-# Expressão CRON padrão (UTC). Formato: sec min hora dia mês diaSemana
-# Exemplo: 0 0 20 * * *  -> executa todo dia às 20:00 UTC
-DEFAULT_CRON = "0 0 20 * * *"
-CRON_EXPR = os.getenv("NOTIFY_CRON", DEFAULT_CRON)
-
-@app.function_name(name="DailyGclickNotify")
-@app.schedule(schedule=CRON_EXPR, arg_name="mytimer", run_on_startup=False, use_monitor=True)
-def daily_gclick_notify(mytimer: func.TimerRequest) -> None:
-    """
-    Executa o ciclo de coleta + classificação + envio de notificações.
-    Ajuste para importar seu orquestrador real (engine.notification_engine.run_cycle).
-    """
-    logging.info(f"[Scheduler] Disparado em {datetime.utcnow().isoformat()}Z (PastDue={mytimer.past_due})")
+# ─────────────────────────────────────────────────────────────
+# HTTP ─ Echo genérico
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="HttpTrigger")
+@app.route(route="http_trigger", methods=["GET", "POST"], auth_level=func.AuthLevel.ANONYMOUS)
+def http_trigger(req: func.HttpRequest) -> func.HttpResponse:
     try:
-        # Import dentro da função para evitar falhas se módulo não existir no cold start
+        if req.method == "GET":
+            name = req.params.get("name", "Mundo")
+            return func.HttpResponse(
+                json.dumps(
+                    {
+                        "message": f"Olá, {name}!",
+                        "method": "GET",
+                        "environment": "Azure" if IS_AZURE else "Local",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "version": APP_VERSION,
+                    }
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+        if req.method == "POST":
+            body = req.get_json()
+            return func.HttpResponse(
+                json.dumps(
+                    {
+                        "echo": body,
+                        "method": "POST",
+                        "environment": "Azure" if IS_AZURE else "Local",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "version": APP_VERSION,
+                    }
+                ),
+                headers={"Content-Type": "application/json"},
+            )
+        return func.HttpResponse("Método não permitido", status_code=405)
+    except Exception:
+        logger.exception("Erro no HTTP trigger genérico")
+        return func.HttpResponse("Erro interno", status_code=500)
+
+
+# ─────────────────────────────────────────────────────────────
+# HTTP ─ Health check
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="HealthCheck")
+@app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def health(req: func.HttpRequest) -> func.HttpResponse:
+    storage_status, storage_info = "not_configured", {}
+    if bot_sender:
         try:
-            from engine.notification_engine import run_cycle  # type: ignore
-            simulacao = os.getenv("SIMULACAO", "false").lower() == "true"
-            run_cycle(simulacao=simulacao)
-        except ImportError:
-            logging.warning("[Scheduler] engine.notification_engine.run_cycle não encontrado. Ajuste a importação.")
-        logging.info("[Scheduler] Finalizado com sucesso.")
-    except Exception as e:
-        logging.exception("[Scheduler] Falhou: %s", e)
+            s_path = getattr(bot_sender.conversation_storage, "file_path", "unknown")
+            storage_status = "healthy" if os.path.exists(s_path) else "missing_file"
+            storage_info = {"path": s_path, "exists": os.path.exists(s_path)}
+        except Exception as st_err:
+            storage_status, storage_info = "error", {"error": str(st_err)}
+
+    try:
+        mapping_test = mapear_apelido_para_teams_id("teste_health_check")
+        mapping_status = "ok" if mapping_test is not None else "no_match"
+    except Exception as mp_err:
+        mapping_status = f"error: {mp_err}"
+
+    return func.HttpResponse(
+        json.dumps(
+            {
+                "status": "healthy",
+                "version": APP_VERSION,
+                "python": sys.version.split()[0],
+                "environment": "Azure" if IS_AZURE else "Local",
+                "bot_configured": bool(bot_sender),
+                "storage": {"status": storage_status, **storage_info},
+                "user_mapping": mapping_status,
+                "timestamp": datetime.utcnow().isoformat(),
+                "functions_detected": {
+                    "total": 7,
+                    "http_endpoints": 5,
+                    "timer_triggers": 2,
+                },
+            }
+        ),
+        headers={"Content-Type": "application/json"},
+    )
