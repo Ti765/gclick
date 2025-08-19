@@ -56,3 +56,34 @@ def get_access_token(force: bool = False) -> str:
     _cached_token = access
     _cached_expira_em = agora + int(expires_in)
     return _cached_token
+
+
+def get_auth_headers() -> dict:
+    """
+    Retorna headers de autenticação para a API do G-Click.
+    Utiliza OAuth token existente ou fallback para token simples.
+    
+    Returns:
+        dict: Headers de autenticação com Authorization e Content-Type
+    """
+    try:
+        # Tenta usar OAuth token existente
+        token = get_access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "GClick-Teams-Bot/1.0"
+        }
+        return headers
+    except Exception:
+        # Fallback para token simples (variável de ambiente)
+        token = os.getenv("GCLICK_TOKEN")
+        if not token:
+            raise RuntimeError("GCLICK_TOKEN não configurado e OAuth falhou")
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "GClick-Teams-Bot/1.0"
+        }
+        return headers

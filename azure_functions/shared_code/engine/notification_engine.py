@@ -1,5 +1,7 @@
 import os
 import time
+import json
+import logging
 from datetime import date, timedelta
 from collections import defaultdict
 from typing import Dict, List, Any, Tuple, Optional
@@ -10,7 +12,53 @@ import yaml
 from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
 from gclick.responsaveis import listar_responsaveis_tarefa
 from teams.webhook import enviar_teams_mensagem
+from teams.cards import create_task_notification_card
 from storage.state import already_sent, register_sent, purge_older_than
+
+# ================= HELPERS PARA ROBUSTEZ =================
+
+def _ensure_card_payload(card) -> dict:
+    """Garante que o payload do card seja dict (Teams/Bot esperam dict)."""
+    if isinstance(card, str):
+        try:
+            return json.loads(card)
+        except Exception:
+            logging.warning("[CARD] Payload veio como string não-JSON; usando fallback.")
+            return {"type": "AdaptiveCard", "version": "1.3"}  # fallback mínimo
+    return card
+
+
+def _has_conversation(storage, user_id: str) -> bool:
+    """Verifica, de forma tolerante, se há reference salva para o usuário."""
+    if storage is None or not user_id:
+        return False
+
+    # Tenta diferentes métodos do storage
+    for method in ("get", "has", "exists", "contains"):
+        if hasattr(storage, method):
+            fn = getattr(storage, method)
+            try:
+                res = fn(user_id)
+                if isinstance(res, bool):
+                    return res
+                return bool(res)  # get(...) pode retornar dict/ref
+            except TypeError:
+                # get(user_id, default)
+                try:
+                    res = fn(user_id, None)  # type: ignore
+                    return bool(res)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    # Fallback para atributos internos
+    for attr in ("_conversations", "references", "_data"):
+        if hasattr(storage, attr):
+            raw = getattr(storage, attr)
+            if isinstance(raw, dict):
+                return user_id in raw
+    return False
 
 try:
     from analytics.metrics import write_notification_cycle, new_run_id
@@ -370,16 +418,42 @@ def run_notification_cycle(
                 # Tenta enviar via bot primeiro (se disponível)
                 if bot_sender:
                     teams_id = mapear_apelido_para_teams_id(apelido)
-                    if teams_id:
+                    if teams_id and _has_conversation(bot_sender.conversation_storage, teams_id):
                         try:
-                            import asyncio
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                asyncio.ensure_future(bot_sender.send_message(teams_id, msg))
-                            else:
-                                loop.run_until_complete(bot_sender.send_message(teams_id, msg))
+                            # Busca as tarefas deste responsável para enviar cards individuais
+                            tarefas_responsavel = grupos_buckets.get(apelido, {})
+                            
+                            # Enviar um card por tarefa
+                            for categoria_urgencia, lista_tarefas in tarefas_responsavel.items():
+                                for tarefa in lista_tarefas:
+                                    try:
+                                        # Dados do responsável para o card
+                                        responsavel_dados = {"nome": apelido, "apelido": apelido}
+                                        
+                                        # Criar card da tarefa
+                                        card_json_str = create_task_notification_card(tarefa, responsavel_dados)
+                                        card_payload = _ensure_card_payload(card_json_str)
+                                        
+                                        # Texto de fallback
+                                        fallback_text = (
+                                            f"🔔 Obrigação: {tarefa.get('nome', 'Sem nome')} "
+                                            f"(Venc: {tarefa.get('dataVencimento', 'N/A')})"
+                                        )
+                                        
+                                        # Enviar card de forma assíncrona
+                                        import asyncio
+                                        loop = asyncio.get_event_loop()
+                                        if loop.is_running():
+                                            asyncio.ensure_future(bot_sender.send_card(teams_id, card_payload, fallback_text))
+                                        else:
+                                            loop.run_until_complete(bot_sender.send_card(teams_id, card_payload, fallback_text))
+                                        
+                                        logging.info(f"[BOT-CARD] Enviado para {apelido} (tarefa: {tarefa.get('id')})")
+                                    except Exception as card_error:
+                                        logging.warning(f"[BOT-CARD] Falha para {apelido} tarefa {tarefa.get('id')}: {card_error}")
+                            
                             mensagem_enviada = True
-                            logging.info(f"[BOT] Enviado para {apelido} (teams_id: {teams_id})")
+                            logging.info(f"[BOT] Cards enviados para {apelido} (teams_id: {teams_id})")
                         except Exception as bot_error:
                             logging.warning(f"[BOT] Falha para {apelido}: {bot_error}")
                 
