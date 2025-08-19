@@ -141,6 +141,22 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
                         }
                     ]
                 }
+            },
+            {
+                "type": "Action.Submit",
+                "title": "✔ Finalizar",
+                "data": {
+                    "action": "finalizar",
+                    "taskId": id_tarefa
+                }
+            },
+            {
+                "type": "Action.Submit",
+                "title": "✖ Dispensar",
+                "data": {
+                    "action": "dispensar", 
+                    "taskId": id_tarefa
+                }
             }
         ]
     }

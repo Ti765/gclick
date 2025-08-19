@@ -7,6 +7,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Tuple, Optional
 
 # ─────────────────────────────────────────────────────────────
 # PATHS & LOG
@@ -74,6 +75,46 @@ except Exception as imp_err:
 # ─────────────────────────────────────────────────────────────
 # Define ANONYMOUS por padrão (cada rota também define explicitamente)
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+# ─────────────────────────────────────────────────────────────
+# HELPERS PARA PROCESSAMENTO DE AÇÕES
+# ─────────────────────────────────────────────────────────────
+
+def _extract_card_action(activity: dict) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extrai (action, task_id) cobrindo múltiplos formatos possíveis do Teams:
+    - message + value.{action, taskId}
+    - invoke (Universal Actions) + value.action.{data, verb}
+    - value.data.{action, taskId}
+    - channelData.postback.{action, taskId} (messageBack)
+    """
+    # Fonte principal do Teams
+    v = activity.get("value") or {}
+    # Alguns clientes colocam no channelData.postback
+    if not v and isinstance(activity.get("channelData"), dict):
+        v = activity["channelData"].get("postback") or {}
+
+    # Universal Actions (Action.Execute): value.action = { type, data, verb, ... }
+    if isinstance(v.get("action"), dict):
+        inner = v["action"]
+        inner_data = inner.get("data") or {}
+        action = inner_data.get("action") or inner.get("verb")
+        task_id = inner_data.get("taskId") or inner_data.get("id") or inner_data.get("task_id")
+        if action or task_id:
+            return action, task_id
+
+    # Formatos simples: value.data.{...}
+    if isinstance(v.get("data"), dict):
+        d = v["data"]
+        action = d.get("action") or d.get("verb")
+        task_id = d.get("taskId") or d.get("id") or d.get("task_id")
+        if action or task_id:
+            return action, task_id
+
+    # Formato clássico: value.{...}
+    action = v.get("action") or v.get("verb")
+    task_id = v.get("taskId") or v.get("id") or v.get("task_id")
+    return action, task_id
 
 # ─────────────────────────────────────────────────────────────
 # BOT FRAMEWORK (opcional – só configura com credenciais)
@@ -212,23 +253,170 @@ def afternoon_notifications(timer: func.TimerRequest) -> None:
 def messages(req: func.HttpRequest) -> func.HttpResponse:
     try:
         body = req.get_json()
-        logger.info(
-            "Teams activity recebida: %s de %s (%s)",
-            body.get("type"),
-            body.get("from", {}).get("name"),
-            body.get("from", {}).get("id"),
-        )
+        msg_type = body.get("type")
+        name = body.get("name")
+        logger.info("Teams activity: type=%s, name=%s", msg_type, name)
+
+        # 1) Universal Actions (invoke/adaptiveCard/action)
+        if msg_type == "invoke" and name in ("adaptiveCard/action", "task/submit"):
+            logger.info("Processando payload 'invoke' de Adaptive Card")
+            return _process_card_action(body)
+
+        # 2) Mensagem normal com 'value' (alguns clientes do Teams)
+        if msg_type == "message" and ("value" in body or "channelData" in body):
+            logger.info("Processando payload 'message' com 'value'")
+            return _process_card_action(body)
+
+        # 3) Demais mensagens (stub)
+        from_user = body.get("from", {}).get("name")
+        from_id = body.get("from", {}).get("id")
+        logger.info("Teams activity recebida: %s de %s (%s)", msg_type, from_user, from_id)
+
         return _json(
             {
-                "status": "received_stub_mode",
+                "status": "received",
                 "adapter_status": "configured" if bot_sender else "not_configured",
                 "timestamp": datetime.utcnow().isoformat(),
-                "note": "Stub — implemente adapter.process_activity para processamento real",
+                "note": "Mensagem recebida (nenhuma ação de card detectada).",
             }
         )
     except Exception:
-        logger.exception("Erro no stub /messages")
+        logger.exception("Erro no processamento /messages")
         return func.HttpResponse("Erro interno", status_code=500)
+
+
+def _process_card_action(body: dict) -> func.HttpResponse:
+    """
+    Processa ações dos botões dos Adaptive Cards.
+    
+    Args:
+        body: Payload do Teams com dados da ação
+        
+    Returns:
+        func.HttpResponse: Resposta da ação processada
+    """
+    try:
+        action_type, task_id = _extract_card_action(body)
+        user_info = body.get("from", {}) or {}
+        user_id = user_info.get("id")
+        user_name = user_info.get("name", "Usuário")
+
+        if not action_type or not task_id:
+            logger.warning("Ação inválida: dados incompletos (action/taskId ausentes)")
+            return _json({"result": "error", "message": "Dados da ação incompletos"}, status=200)
+
+        logger.info("Ação '%s' para task %s do usuário %s", action_type, task_id, user_name)
+
+        confirmation_text = ""
+        result_status = ""
+
+        if action_type == "dispensar":
+            try:
+                success = _dispensar_tarefa_gclick(task_id)
+                if success:
+                    confirmation_text = f"✅ Tarefa **{task_id}** dispensada no G-Click com sucesso!"
+                    result_status = "dispensada"
+                else:
+                    confirmation_text = f"⚠️ Não foi possível dispensar a tarefa **{task_id}** no G-Click."
+                    result_status = "erro_dispensar"
+            except Exception as e:
+                logger.error("Erro ao dispensar tarefa %s: %s", task_id, e)
+                confirmation_text = f"⚠️ Erro ao conectar com G-Click para dispensar a tarefa **{task_id}**."
+                result_status = "erro_conexao"
+
+        elif action_type == "finalizar":
+            confirmation_text = (
+                f"✅ Tarefa **{task_id}** marcada como **finalizada** no seu chat.\n"
+                f"*(Status não alterado no G-Click)*"
+            )
+            result_status = "finalizada"
+
+        else:
+            logger.warning("Ação desconhecida: %s", action_type)
+            confirmation_text = f"⚠️ Ação '{action_type}' não reconhecida."
+            result_status = "acao_invalida"
+
+        # Enviar confirmação para o usuário (se tivermos referência de conversa)
+        if bot_sender and user_id and confirmation_text:
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(bot_sender.send_message(user_id, confirmation_text))
+                else:
+                    loop.run_until_complete(bot_sender.send_message(user_id, confirmation_text))
+                logger.info("Confirmação enviada para %s (%s)", user_name, user_id)
+            except Exception as e:
+                logger.error("Falha ao enviar confirmação para %s: %s", user_id, e)
+
+        # Importante: para 'invoke' o Bot Framework espera 200
+        return _json(
+            {
+                "result": result_status,
+                "taskId": task_id,
+                "action": action_type,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            status=200,
+        )
+
+    except Exception as e:
+        logger.exception("Erro ao processar ação do card: %s", e)
+        return _json({"result": "error", "message": "Erro interno ao processar ação"}, status=200)
+
+
+def _dispensar_tarefa_gclick(task_id: str) -> bool:
+    """
+    Dispensa uma tarefa no G-Click alterando seu status para 'D' (Dispensado).
+    
+    Args:
+        task_id: ID da tarefa no G-Click
+        
+    Returns:
+        bool: True se dispensada com sucesso, False caso contrário
+    """
+    try:
+        import requests
+        import os
+        
+        # URL base do G-Click
+        base_url = os.getenv("GCLICK_BASE_URL", "https://api.gclick.com.br")
+        
+        # Headers com autenticação (assume que já existe função para isso)
+        try:
+            # Tentar importar função de autenticação existente
+            if SHARED_DIR.exists():
+                sys.path.insert(0, str(SHARED_DIR))
+            from gclick.auth import get_auth_headers
+            headers = get_auth_headers()
+        except ImportError:
+            # Fallback: construir headers manualmente
+            token = os.getenv("GCLICK_TOKEN")
+            if not token:
+                logger.error("Token G-Click não configurado")
+                return False
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+        
+        # Endpoint para dispensar tarefa (adaptar conforme API real do G-Click)
+        # Nota: Este endpoint é uma suposição - deve ser confirmado com a documentação
+        endpoint = f"{base_url}/tarefas/{task_id}/status"
+        payload = {"status": "D"}  # D = Dispensado
+        
+        response = requests.put(endpoint, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info(f"Tarefa {task_id} dispensada com sucesso no G-Click")
+            return True
+        else:
+            logger.error(f"Falha ao dispensar tarefa {task_id}: HTTP {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Exceção ao dispensar tarefa {task_id}: {e}")
+        return False
 
 # ─────────────────────────────────────────────────────────────
 # HTTP — Listagem de usuários conhecidos
