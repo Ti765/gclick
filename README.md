@@ -44,10 +44,31 @@ O **G-Click Teams** é uma solução enterprise para automação de notificaçõ
 
 ## ⭐ Features Principais
 
-### 🤖 **Bot Framework Integration**
+### 🤖 **Bot Framework Integration** (Sprint 1 & 2)
 - Mensagens proativas diretas para usuários
 - Storage persistente de referências de conversação
 - Mapeamento automático G-Click → Teams ID
+- **[NOVO] Cartões adaptativos interativos com botões**
+- **[NOVO] Webhook robusto para notificações em tempo real**
+
+### 🕒 **Agendamento Inteligente** (Sprint 2)
+- **[NOVO] Timer duplo: 8:00 e 17:30 (BRT) em dias úteis**
+- **[NOVO] Classificação avançada de urgência**
+- **[NOVO] Filtro de tarefas vencidas (até 1 dia de atraso)**
+- Horários configuráveis via variáveis de ambiente
+
+### 🎨 **Experiência de Usuário Aprimorada** (Sprint 2)
+- **[NOVO] Adaptive Cards com design responsivo**
+- **[NOVO] Indicadores visuais de urgência (🔴🟡🟢)**
+- **[NOVO] Botões para ações rápidas (Ver no G-Click, Detalhes)**
+- **[NOVO] Mensagens formatadas com fallback para texto**
+
+### 🛡️ **Resiliência e Confiabilidade** (Sprint 2)
+- **[NOVO] Tratamento robusto de falhas em lote**
+- **[NOVO] Retry automático com backoff exponencial**
+- **[NOVO] Contador global de erros e monitoramento**
+- **[NOVO] Logs detalhados para auditoria**
+- **[NOVO] Validação rigorosa de payload do webhook**
 - Endpoints para webhook e debug
 
 ### 🔄 **Motor de Notificações Inteligente**
@@ -89,23 +110,59 @@ pip install -r requirements.txt
 Crie `.env` na raiz do projeto:
 
 ```env
-# G-Click API
+# G-Click API - Obrigatórias
 GCLICK_CLIENT_ID=seu_client_id
 GCLICK_CLIENT_SECRET=seu_client_secret
 GCLICK_BASE_URL=https://api.gclick.com.br
+GCLICK_SISTEMA=nome_do_sistema
+GCLICK_CONTA=sua_conta
+GCLICK_USUARIO=seu_usuario
+GCLICK_SENHA=sua_senha
+GCLICK_EMPRESA=codigo_empresa
 
-# Microsoft Bot Framework
+# Microsoft Bot Framework - Obrigatórias
 MicrosoftAppId=seu_app_id
 MicrosoftAppPassword=sua_app_password
 MicrosoftAppType=MultiTenant
 
-# Teams Webhook (opcional)
+# Teams Webhook (opcional - usado como fallback)
 TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/...
 
-# Configurações
+# Configurações do Sistema (opcionais)
 SIMULACAO=false
 NOTIFY_CRON=0 0 20 * * *
+GCLICK_DEBUG=0
+ALERT_ZERO_ABERTOS_TO_TEAMS=false
+GCLICK_CONFIG_FILE=config/config.yaml
+GCLICK_CATEGORIA=todas
+METRICS_DIR=storage/metrics
+APP_TIMEZONE=America/Sao_Paulo
 ```
+
+#### **📋 Tabela de Variáveis de Ambiente**
+
+| Variável | Obrigatória | Propósito | Exemplo |
+|----------|-------------|-----------|---------|
+| `GCLICK_CLIENT_ID` | ✅ | ID do cliente OAuth2 G-Click | `abc123def456` |
+| `GCLICK_CLIENT_SECRET` | ✅ | Secret do cliente OAuth2 | `secret_key_here` |
+| `GCLICK_BASE_URL` | ✅ | URL base da API G-Click | `https://api.gclick.com.br` |
+| `GCLICK_SISTEMA` | ✅ | Nome do sistema G-Click | `FISCAL_MANAGER` |
+| `GCLICK_CONTA` | ✅ | Conta no sistema G-Click | `12345` |
+| `GCLICK_USUARIO` | ✅ | Usuário de acesso | `usuario.api` |
+| `GCLICK_SENHA` | ✅ | Senha do usuário | `senha_segura` |
+| `GCLICK_EMPRESA` | ✅ | Código da empresa | `001` |
+| `MicrosoftAppId` | ✅ | ID da aplicação Bot Framework | `12345678-1234-1234-1234-123456789012` |
+| `MicrosoftAppPassword` | ✅ | Password da aplicação bot | `password_bot_framework` |
+| `MicrosoftAppType` | ✅ | Tipo da aplicação bot | `MultiTenant` |
+| `TEAMS_WEBHOOK_URL` | ❌ | URL webhook Teams (fallback) | `https://outlook.office.com/webhook/...` |
+| `SIMULACAO` | ❌ | Modo simulação (dry-run) | `false` |
+| `NOTIFY_CRON` | ❌ | Expressão cron para timer | `0 0 20 * * *` |
+| `GCLICK_DEBUG` | ❌ | Debug HTTP requests | `0` |
+| `ALERT_ZERO_ABERTOS_TO_TEAMS` | ❌ | Alertar quando zero tarefas | `false` |
+| `GCLICK_CONFIG_FILE` | ❌ | Caminho config YAML | `config/config.yaml` |
+| `GCLICK_CATEGORIA` | ❌ | Filtro de categoria | `todas` |
+| `METRICS_DIR` | ❌ | Diretório de métricas | `storage/metrics` |
+| `APP_TIMEZONE` | ❌ | Timezone da aplicação | `America/Sao_Paulo` |
 
 ### **3. Configuração Local Azure Functions**
 
@@ -141,6 +198,65 @@ python status_dashboard.py
 
 # Loop contínuo
 python notify_loop.py
+```
+
+### **Testes e Simulação** (Sprint 2)
+
+```bash
+# Teste completo de ponta a ponta
+python tests/test_notification_flow.py
+
+# Simular webhook do G-Click (precisa do Functions rodando)
+python tests/simulate_gclick_webhook.py --scenario single
+python tests/simulate_gclick_webhook.py --scenario multiple
+python tests/simulate_gclick_webhook.py --scenario overdue
+
+# Listar cenários de teste disponíveis
+python tests/simulate_gclick_webhook.py --list-scenarios
+
+# Teste com URL personalizada
+python tests/simulate_gclick_webhook.py --url https://sua-function-app.azurewebsites.net/api/gclick
+```
+
+### **Exemplos de Payload para Webhook** (Sprint 2)
+
+**Payload básico:**
+```json
+{
+  "evento": "tarefa_vencimento_proximo",
+  "tarefa": {
+    "id": "4.12345",
+    "nome": "SPED - ECF (Escrituração Contábil Fiscal)",
+    "dataVencimento": "2025-07-31",
+    "status": "A"
+  },
+  "responsaveis": [
+    {
+      "id": "123",
+      "apelido": "neusag.glip",
+      "nome": "Neusa Gomes",
+      "email": "neusa@exemplo.com"
+    }
+  ],
+  "urgencia": "alta"
+}
+```
+
+**Payload com múltiplos responsáveis:**
+```json
+{
+  "evento": "tarefa_vencimento_hoje",
+  "tarefa": {
+    "id": "4.67890",
+    "nome": "CSLL e IRPJ - LR",
+    "dataVencimento": "2025-07-30",
+    "status": "A"
+  },
+  "responsaveis": [
+    {"apelido": "sueli.coelho", "nome": "Sueli Coelho"},
+    {"apelido": "daniele.rocha", "nome": "Daniele Rocha"}
+  ]
+}
 ```
 
 ### **Azure Functions (Produção)**
