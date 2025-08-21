@@ -1074,4 +1074,4 @@ Para dúvidas ou problemas:
 
 **✨ Desenvolvido com ❤️ para automatizar e simplificar o compliance fiscal.**
 
-**🚀 v2.1.4 - Production Ready com Adaptive Cards Interativos e Compatibilidade Universal Teams!**
+**🚀 v2.1.4+ - Production Ready com Adaptive Cards Interativos, Timezone BRT e Relatórios Excel!**
