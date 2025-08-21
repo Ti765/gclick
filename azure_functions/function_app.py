@@ -117,37 +117,55 @@ def _extract_card_action(activity: dict) -> Tuple[Optional[str], Optional[str]]:
     return action, task_id
 
 # ─────────────────────────────────────────────────────────────
-# BOT FRAMEWORK (opcional – só configura com credenciais)
 # ─────────────────────────────────────────────────────────────
-APP_ID = os.getenv("MicrosoftAppId", "")
-APP_PASSWORD = os.getenv("MicrosoftAppPassword", "")
+# CONFIGURAÇÃO ROBUSTA DO BOT FRAMEWORK
+# ─────────────────────────────────────────────────────────────
+# Variáveis de ambiente (tentativa com nomes alternativos para compatibilidade)
+APP_ID = os.getenv("MicrosoftAppId") or os.getenv("MICROSOFT_APP_ID", "")
+APP_PASSWORD = os.getenv("MicrosoftAppPassword") or os.getenv("MICROSOFT_APP_PASSWORD", "")
 
 bot_sender = None
+conversation_storage = None
+
 if APP_ID and APP_PASSWORD:
     try:
         from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings  # type: ignore
 
-        adapter = BotFrameworkAdapter(BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD))
+        # Configurar adapter do Bot Framework
+        adapter_settings = BotFrameworkAdapterSettings(APP_ID, APP_PASSWORD)
+        adapter = BotFrameworkAdapter(adapter_settings)
 
-        # storage path persistente (fora de wwwroot em produção)
-        if IS_AZURE and os.getenv("HOME"):
-            base = Path(os.getenv("HOME"))
-            storage_path = base / "data" / "conversation_references.json"
+        # Configuração de storage path persistente baseado no ambiente
+        if IS_AZURE:
+            # Azure Functions: usar diretório persistente $HOME/data
+            storage_base = Path(os.getenv("HOME", "/tmp")) / "data" / "gclick_teams"
         else:
-            base = Path(__file__).parent / "storage"
-            base.mkdir(parents=True, exist_ok=True)
-            storage_path = base / "conversation_references.json"
-        storage_path.parent.mkdir(parents=True, exist_ok=True)
+            # Desenvolvimento local: usar diretório do projeto
+            storage_base = Path(__file__).parent / "storage"
+        
+        # Criar diretórios necessários
+        storage_base.mkdir(parents=True, exist_ok=True)
+        storage_path = storage_base / "conversation_references.json"
 
+        # Inicializar armazenamento robusto de conversation references
         conversation_storage = ConversationReferenceStorage(str(storage_path))
+        
+        # Inicializar BotSender com configuração completa
         bot_sender = BotSender(adapter, APP_ID, conversation_storage)
 
-        # expõe para o engine (se presente)
+        logger.info("🤖  Bot Framework configurado com sucesso")
+        logger.info("📁  Storage path: %s", storage_path)
+        logger.info("🆔  App ID: %s...", APP_ID[:8] if APP_ID else "N/A")
+
+        # Integrar storage na engine de notificação (se disponível)
         try:
             import engine.notification_engine as ne  # type: ignore
             ne.bot_sender = bot_sender
             ne.adapter = adapter
             ne.conversation_storage = conversation_storage
+            logger.info("🔗  ConversationStorage integrado à NotificationEngine")
+        except Exception as integration_err:
+            logger.warning("⚠️  Falha na integração com NotificationEngine: %s", integration_err)
         except Exception:
             pass
 
@@ -251,33 +269,108 @@ def afternoon_notifications(timer: func.TimerRequest) -> None:
 @app.function_name(name="Messages")
 @app.route(route="messages", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS)
 def messages(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Endpoint robusto para receber mensagens do Teams.
+    Processa Adaptive Cards, armazena ConversationReferences e trata interações do usuário.
+    """
     try:
         body = req.get_json()
         msg_type = body.get("type")
         name = body.get("name")
-        logger.info("Teams activity: type=%s, name=%s", msg_type, name)
+        from_user = body.get("from", {})
+        conversation = body.get("conversation", {})
+        
+        logger.info("📱 Teams activity: type=%s, name=%s, user=%s", 
+                   msg_type, name, from_user.get("name"))
+
+        # Armazenar/atualizar ConversationReference se disponível
+        if conversation_storage and conversation.get("id"):
+            try:
+                # Extrair informações necessárias para ConversationReference
+                user_id = from_user.get("id")
+                conversation_id = conversation.get("id")
+                service_url = body.get("serviceUrl", "")
+                
+                if user_id and conversation_id:
+                    # Criar/atualizar entrada no storage
+                    conversation_storage.store_conversation_reference(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        service_url=service_url,
+                        activity_data=body
+                    )
+                    logger.debug("💾 ConversationReference armazenado para user=%s", user_id)
+            except Exception as storage_err:
+                logger.warning("⚠️ Falha ao armazenar ConversationReference: %s", storage_err)
 
         # 1) Universal Actions (invoke/adaptiveCard/action)
         if msg_type == "invoke" and name in ("adaptiveCard/action", "task/submit"):
-            logger.info("Processando payload 'invoke' de Adaptive Card")
+            logger.info("🎯 Processando payload 'invoke' de Adaptive Card")
             return _process_card_action(body)
 
         # 2) Mensagem normal com 'value' (alguns clientes do Teams)
         if msg_type == "message" and ("value" in body or "channelData" in body):
-            logger.info("Processando payload 'message' com 'value'")
+            logger.info("💬 Processando payload 'message' com 'value'")
             return _process_card_action(body)
 
-        # 3) Demais mensagens (stub)
-        from_user = body.get("from", {}).get("name")
-        from_id = body.get("from", {}).get("id")
-        logger.info("Teams activity recebida: %s de %s (%s)", msg_type, from_user, from_id)
+        # 3) Mensagem de texto simples ou instalação de bot
+        if msg_type == "message":
+            text = body.get("text", "").strip().lower()
+            
+            # Comandos básicos do bot
+            if text in ["/start", "/help", "ajuda", "help"]:
+                response_text = ("👋 Olá! Sou o bot de notificações do G-Click.\n\n"
+                               "Recebo notificações automáticas sobre tarefas vencidas e próximas do vencimento.\n"
+                               "Digite `/status` para verificar seu status de notificações.")
+                
+                if bot_sender:
+                    try:
+                        # Enviar resposta direta
+                        bot_sender.send_direct_message(body, response_text)
+                        logger.info("✅ Mensagem de ajuda enviada para %s", from_user.get("name"))
+                    except Exception as send_err:
+                        logger.error("❌ Falha ao enviar mensagem de ajuda: %s", send_err)
+                
+                return _json({"status": "help_sent", "timestamp": datetime.utcnow().isoformat()})
+            
+            elif text == "/status":
+                # Verificar status das notificações do usuário
+                user_teams_id = from_user.get("id")
+                status_info = {
+                    "user_id": user_teams_id,
+                    "conversation_stored": bool(conversation_storage and 
+                                              conversation_storage.get_conversation_reference(user_teams_id)),
+                    "bot_configured": bool(bot_sender),
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+                status_text = (f"📊 Status de Notificações:\n\n"
+                             f"• ID do usuário: `{user_teams_id}`\n"
+                             f"• Conversa armazenada: {'✅' if status_info['conversation_stored'] else '❌'}\n"
+                             f"• Bot configurado: {'✅' if status_info['bot_configured'] else '❌'}\n"
+                             f"• Timestamp: {status_info['timestamp']}")
+                
+                if bot_sender:
+                    try:
+                        bot_sender.send_direct_message(body, status_text)
+                        logger.info("✅ Status enviado para %s", from_user.get("name"))
+                    except Exception as send_err:
+                        logger.error("❌ Falha ao enviar status: %s", send_err)
+                
+                return _json(status_info)
+
+        # 4) Demais tipos de mensagem (log e confirmação)
+        logger.info("📨 Teams activity recebida: %s de %s (%s)", 
+                   msg_type, from_user.get("name"), from_user.get("id"))
 
         return _json(
             {
                 "status": "received",
+                "type": msg_type,
                 "adapter_status": "configured" if bot_sender else "not_configured",
+                "conversation_storage_status": "configured" if conversation_storage else "not_configured",
                 "timestamp": datetime.utcnow().isoformat(),
-                "note": "Mensagem recebida (nenhuma ação de card detectada).",
+                "note": "Mensagem recebida e processada com sucesso.",
             }
         )
     except Exception:

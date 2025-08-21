@@ -1,5 +1,79 @@
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from typing import Dict, List, Any, Optional
+import logging
+
+# Timezone imports com fallback
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    try:
+        from backports.zoneinfo import ZoneInfo
+    except ImportError:
+        ZoneInfo = None
+
+# Configuração para timezone BRT (Brasília)
+BRT_TIMEZONE = ZoneInfo("America/Sao_Paulo") if ZoneInfo else None
+
+def obter_data_atual_brt() -> date:
+    """Obtém a data atual no timezone BRT (Brasília)."""
+    if BRT_TIMEZONE:
+        agora_brt = datetime.now(BRT_TIMEZONE)
+        return agora_brt.date()
+    else:
+        # Fallback para UTC/local se zoneinfo não disponível
+        logging.warning("ZoneInfo não disponível, usando data local")
+        return date.today()
+
+
+def separar_tarefas_overdue(tarefas: List[Dict[str, Any]], hoje: Optional[date] = None) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Separa tarefas entre normais (para notificação) e overdue (para relatório).
+    
+    Args:
+        tarefas: Lista de tarefas
+        hoje: Data atual (opcional, usar data BRT se None)
+        
+    Returns:
+        Dict com "normais" (até 1 dia atraso) e "overdue" (mais de 1 dia atraso)
+    """
+    if hoje is None:
+        hoje = obter_data_atual_brt()
+    
+    normais = []
+    overdue = []
+    
+    for tarefa in tarefas:
+        # Tenta obter a data já parseada
+        dt = tarefa.get("_dt_dataVencimento")
+        
+        if not dt:
+            # Tenta parsear da string
+            dv = tarefa.get("dataVencimento")
+            if dv:
+                try:
+                    dt = datetime.strptime(dv, "%Y-%m-%d").date()
+                except Exception:
+                    # Se não conseguir parsear, considera normal (será ignorada na classificação)
+                    normais.append(tarefa)
+                    continue
+            else:
+                # Sem data de vencimento, considera normal
+                normais.append(tarefa)
+                continue
+        
+        # Classifica baseado no atraso
+        if dt < hoje - timedelta(days=1):
+            # Mais de 1 dia de atraso - vai para relatório
+            overdue.append(tarefa)
+        else:
+            # Até 1 dia de atraso ou futuro - vai para notificação normal
+            normais.append(tarefa)
+    
+    return {
+        "normais": normais,
+        "overdue": overdue
+    }
+
 
 def classificar_tarefa_individual(tarefa: Dict[str, Any], hoje: date, dias_proximos: int = 3) -> Optional[str]:
     """
@@ -52,7 +126,7 @@ def classificar_tarefa_individual(tarefa: Dict[str, Any], hoje: date, dias_proxi
     return None
 
 
-def classificar_por_vencimento(tarefas, hoje: date, dias_proximos: int = 3):
+def classificar_por_vencimento(tarefas, hoje: Optional[date] = None, dias_proximos: int = 3):
     """
     Retorna dicionário com listas:
       - vencidas (até 1 dia de atraso)
@@ -60,7 +134,15 @@ def classificar_por_vencimento(tarefas, hoje: date, dias_proximos: int = 3):
       - vence_em_3_dias (1 .. dias_proximos)
     Considera campo 'dataVencimento' (string YYYY-MM-DD) ou _dt_dataVencimento.
     Ignora tarefas sem data de vencimento ou com mais de 1 dia de atraso.
+    
+    Args:
+        tarefas: Lista de tarefas a classificar
+        hoje: Data atual (opcional, usar data BRT se None)
+        dias_proximos: Número de dias futuros a considerar
     """
+    if hoje is None:
+        hoje = obter_data_atual_brt()
+    
     vencidas = []
     vence_hoje = []
     vence_em_3 = []

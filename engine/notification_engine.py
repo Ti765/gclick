@@ -15,6 +15,15 @@ from teams.webhook import enviar_teams_mensagem
 from teams.cards import create_task_notification_card
 from storage.state import already_sent, register_sent, purge_older_than
 
+# Imports para funcionalidades avançadas
+try:
+    from engine.classification import separar_tarefas_overdue, obter_data_atual_brt
+    from reports.overdue_report import gerar_relatorio_excel_overdue
+    HAS_ADVANCED_FEATURES = True
+except ImportError as e:
+    logging.warning("Funcionalidades avançadas não disponíveis: %s", e)
+    HAS_ADVANCED_FEATURES = False
+
 # ================= HELPERS PARA ROBUSTEZ =================
 
 def _ensure_card_payload(card) -> dict:
@@ -305,7 +314,7 @@ def run_notification_cycle(
     if run_id is None:
         run_id = new_run_id('notify')
 
-    hoje = date.today()
+    hoje = obter_data_atual_brt() if HAS_ADVANCED_FEATURES else date.today()
     t_inicio = hoje
     t_fim = hoje + timedelta(days=dias_proximos)
 
@@ -332,19 +341,49 @@ def run_notification_cycle(
     if verbose:
         print(f"[DEBUG] Após filtro status abertos={apenas_status_abertos}: {len(tarefas_filtradas)}")
 
-    # 3. Classificação global
+    # 3. Separação de tarefas normais e overdue (se disponível)
+    tarefas_normalizadas = [normalizar_tarefa(t) for t in tarefas_filtradas]
+    
+    if HAS_ADVANCED_FEATURES:
+        separacao = separar_tarefas_overdue(tarefas_normalizadas, hoje)
+        tarefas_para_notificacao = separacao["normais"]
+        tarefas_overdue = separacao["overdue"]
+        
+        # Gerar relatório Excel para tarefas com muito atraso
+        if tarefas_overdue and execution_mode == 'live':
+            try:
+                relatorio_path = gerar_relatorio_excel_overdue(
+                    tarefas_overdue, 
+                    output_dir="reports/exports",
+                    hoje=hoje
+                )
+                logging.info("📊 Relatório Excel gerado: %s (%d tarefas)", 
+                           relatorio_path, len(tarefas_overdue))
+            except Exception as excel_err:
+                logging.error("❌ Falha ao gerar relatório Excel: %s", excel_err)
+        
+        if verbose:
+            print(f"[DEBUG] Separação - Normais: {len(tarefas_para_notificacao)}, "
+                  f"Overdue: {len(tarefas_overdue)}")
+    else:
+        tarefas_para_notificacao = tarefas_normalizadas
+        tarefas_overdue = []
+
+    # 4. Classificação das tarefas normais
     buckets_globais = {"vencidas": [], "vence_hoje": [], "vence_em_3_dias": []}
-    norm_tarefas = [normalizar_tarefa(t) for t in tarefas_filtradas]
-    for nt in norm_tarefas:
+    for nt in tarefas_para_notificacao:
         cls = classificar(nt, hoje, dias_proximos)
         if cls:
             buckets_globais[cls].append(nt)
 
     relevantes = buckets_globais["vencidas"] + buckets_globais["vence_hoje"] + buckets_globais["vence_em_3_dias"]
     if verbose:
-        print("[INFO] Classificação global:", {k: len(v) for k, v in buckets_globais.items()}, "relevantes=", len(relevantes))
+        print("[INFO] Classificação:", {k: len(v) for k, v in buckets_globais.items()}, 
+              "relevantes=", len(relevantes))
+        if tarefas_overdue:
+            print(f"[INFO] Tarefas overdue (relatório): {len(tarefas_overdue)}")
 
-    # 4. Agrupamento de responsáveis
+    # 5. Agrupamento de responsáveis
     grupos_resps = agrupar_por_responsavel(
         relevantes,
         max_responsaveis_lookup=max_responsaveis_lookup,
