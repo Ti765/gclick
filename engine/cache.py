@@ -8,12 +8,22 @@ import time
 import json
 import logging
 from typing import Any, Dict, Optional, Callable, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dataclasses import dataclass, asdict
 from threading import Lock
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+def _json_dumps_safe(obj) -> str:
+    """Serializa objetos para JSON com suporte a date/datetime."""
+    def _default(o):
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        elif isinstance(o, timedelta):
+            return str(o)  # timedelta não tem isoformat()
+        return str(o)
+    return json.dumps(obj, ensure_ascii=False, default=_default)
 
 @dataclass
 class CacheEntry:
@@ -87,7 +97,7 @@ class IntelligentCache:
             return value
             
         try:
-            serialized = json.dumps(value, ensure_ascii=False)
+            serialized = _json_dumps_safe(value)
             if len(serialized) > self.compression_threshold:
                 import gzip
                 import base64

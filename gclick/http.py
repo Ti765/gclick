@@ -6,6 +6,8 @@ from .auth import get_access_token
 
 BASE_URL = "https://api.gclick.com.br"
 DEBUG = os.getenv("GCLICK_DEBUG", "0") == "1"
+# Configuração de SSL verify via environment variable
+SSL_VERIFY = os.getenv("GCLICK_SSL_VERIFY", "true").lower() in ("1", "true", "yes")
 
 class GClickHTTPError(RuntimeError):
     def __init__(self, message, status=None, url=None, body=None, trace_id=None):
@@ -35,7 +37,7 @@ def gclick_get(path: str, params=None, retry=True, max_retries=2, backoff=1.5):
             "Authorization": f"Bearer {token}",
             "Accept": "application/json"
         }
-        resp = requests.get(url, headers=headers, params=params, timeout=40)
+        resp = requests.get(url, headers=headers, params=params, timeout=40, verify=SSL_VERIFY)
 
         if resp.status_code in (401, 403) and retry:
             # Força renovação token

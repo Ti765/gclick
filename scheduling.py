@@ -42,6 +42,7 @@ def main():
         execution_mode=args.mode,
         run_id=run_id,
         run_reason=args.reason,
+        max_pages=None,  # Ilimitado para execução em produção
     )
     logging.info("Fim ciclo run_id=%s open=%s vencidas=%s hoje=%s proximos=%s", run_id,
                  metrics.get('tasks_open_after_filter'), metrics.get('tasks_vencidas'),
