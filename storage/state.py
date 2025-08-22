@@ -4,6 +4,16 @@ from threading import RLock
 from datetime import date, datetime, timedelta
 import logging
 
+def _json_dumps_safe(obj, **kwargs) -> str:
+    """Serializa objetos para JSON com suporte a date/datetime."""
+    def _default(o):
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        elif isinstance(o, timedelta):
+            return str(o)  # timedelta não tem isoformat()
+        return str(o)
+    return json.dumps(obj, ensure_ascii=False, default=_default, **kwargs)
+
 _STATE_FILE = Path("storage/notification_state.json")
 _LOCK = RLock()
 
@@ -11,7 +21,7 @@ def _ensure_file():
     if not _STATE_FILE.parent.exists():
         _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not _STATE_FILE.exists():
-        _STATE_FILE.write_text(json.dumps({"entries": []}, ensure_ascii=False))
+        _STATE_FILE.write_text(_json_dumps_safe({"entries": []}))
 
 def load_state():
     with _LOCK:
@@ -26,7 +36,7 @@ def load_state():
 
 def save_state(data):
     with _LOCK:
-        _STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        _STATE_FILE.write_text(_json_dumps_safe(data, indent=2))
 
 def already_sent(key: str) -> bool:
     data = load_state()

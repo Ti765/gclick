@@ -26,7 +26,12 @@ APP_VERSION = "2.2.0"
 
 # Flags de ambiente e configuração dinâmica
 DEBUG_MOCK = os.getenv("DEBUG_MOCK", "false").lower() == "true"
-IS_AZURE = bool(os.getenv("WEBSITE_INSTANCE_ID") or os.getenv("HOME"))
+# Verdadeiro apenas quando estiver hospedado no Azure App Service / Functions
+IS_AZURE = bool(os.getenv("WEBSITE_INSTANCE_ID"))
+
+# (opcional) helper que pode ser útil em logs e ramificações
+IS_LOCAL = not IS_AZURE
+
 
 # Feature flags para habilitar/desabilitar funcionalidades
 FEATURES = {
@@ -427,7 +432,8 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                    msg_type, name, from_user.get("name"))
 
         # Armazenar/atualizar ConversationReference se disponível e feature habilitada
-        if FEATURES["conversation_storage"] and conversation_storage and conversation.get("id"):
+        stored = False  # NOVO: flag para rastrear se foi armazenado
+        if FEATURES["conversation_storage"] and conversation_storage:
             try:
                 # Extrair informações necessárias para ConversationReference
                 user_id = from_user.get("id")
@@ -437,7 +443,7 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                 channel_id = body.get("channelId", "msteams")
                 
                 if user_id and conversation_id:
-                    # Criar dados estruturados para ConversationReference
+                    # Caminho normal: payload real vindo do Teams
                     conversation_data = {
                         "user": {
                             "id": user_id,
@@ -467,7 +473,42 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                         user_id=user_id,
                         conversation_data=conversation_data
                     )
+                    stored = True
                     logger.debug("💾 ConversationReference robusto armazenado para user=%s", user_id)
+                    
+                # Fallback DEV: sem conversation.id, mas com from.id (não funciona para envio real)
+                elif user_id and not IS_AZURE:
+                    conversation_data = {
+                        "user": {
+                            "id": user_id,
+                            "name": user_name,
+                            "aad_object_id": from_user.get("aadObjectId"),
+                            "role": from_user.get("role", "user")
+                        },
+                        "conversation": {
+                            "id": f"dev-{user_id}",
+                            "name": "DEV Conversation",
+                            "conversation_type": "personal",
+                            "tenant_id": "dev-tenant"
+                        },
+                        "channel_id": channel_id,
+                        "service_url": service_url or "https://smba.trafficmanager.net/amer/",
+                        "locale": body.get("locale", CONFIG["locale"]),
+                        "timezone": body.get("timezone", CONFIG["timezone"]),
+                        "last_activity": {
+                            "type": body.get("type"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "id": body.get("id")
+                        }
+                    }
+                    
+                    conversation_storage.store_conversation_reference(
+                        user_id=user_id,
+                        conversation_data=conversation_data
+                    )
+                    stored = True
+                    logger.info("💾 ConversationReference DEV (stub) armazenado para %s", user_id)
+                    
             except Exception as storage_err:
                 logger.warning("⚠️ Falha ao armazenar ConversationReference: %s", storage_err)
 
@@ -533,7 +574,7 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
 
         return _json(
             {
-                "status": "received",
+                "status": "reference_stored" if stored else "received",
                 "type": msg_type,
                 "adapter_status": "configured" if bot_sender else "not_configured",
                 "conversation_storage_status": "configured" if conversation_storage else "not_configured",
@@ -764,10 +805,10 @@ def config_manager(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Erro interno", status_code=500)
 
 # ─────────────────────────────────────────────────────────────
-# HTTP — Listagem de usuários conhecidos
+# HTTP — Status detalhado das features e configurações
 # ─────────────────────────────────────────────────────────────
 @app.function_name(name="HealthStatus")
-@app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+@app.route(route="healthz", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def health_status(req: func.HttpRequest) -> func.HttpResponse:
     """
     Endpoint de saúde que exibe status das features e configurações.
@@ -800,6 +841,7 @@ def health_status(req: func.HttpRequest) -> func.HttpResponse:
         logger.exception("Erro em /health")
         return func.HttpResponse("Erro interno", status_code=500)
 
+@app.function_name(name="ResilienceMetrics")
 @app.route(route="metrics/resilience", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def resilience_metrics(req: func.HttpRequest) -> func.HttpResponse:
     """
@@ -813,10 +855,19 @@ def resilience_metrics(req: func.HttpRequest) -> func.HttpResponse:
             
             resilience_stats = resilience_manager.get_stats()
             
-            # Estatísticas do cache (se disponível)
+            # Estatísticas do cache (com import seguro do ne)
             cache_stats = {}
-            if hasattr(ne, 'notification_cache') and ne.notification_cache:
-                cache_stats = ne.notification_cache.get_stats()
+            try:
+                # Tentar determinar qual pacote usar
+                try:
+                    import shared_code.engine.notification_engine as ne  # type: ignore
+                except Exception:
+                    import engine.notification_engine as ne  # type: ignore
+                    
+                if hasattr(ne, 'notification_cache') and ne.notification_cache:
+                    cache_stats = ne.notification_cache.get_stats()
+            except Exception as cache_err:
+                logger.debug("Cache stats não disponível: %s", cache_err)
             
             metrics_data = {
                 "timestamp": datetime.utcnow().isoformat(),
