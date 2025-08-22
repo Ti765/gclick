@@ -1,3 +1,7 @@
+# Configuração centralizada de notificações e relatórios
+# G-Click Teams Integration
+
+# Políticas de notificação (mantendo compatibilidade com configuração existente)
 notificacao:
   dias_proximos: 3
   page_size: 50
@@ -9,6 +13,163 @@ notificacao:
   detalhar_limite: 5             # quantas tarefas listar antes de resumir "X tarefas..."
   categoria_padrao: "Obrigacao"
   enviar_resumo_global: true
+
+# Configurações expandidas de notificação
+notification_policies:
+  # Filtros de classificação
+  classification:
+    dias_proximos: 3  # Mantém compatibilidade com notificacao.dias_proximos
+    max_atraso_notificacao: 1  # Máximo de dias de atraso para notificação (acima vai para relatório)
+  
+  # Configurações de timezone
+  timezone:
+    name: "America/Sao_Paulo"  # BRT - Brasília
+    fallback_to_local: true    # Usar timezone local se BRT não disponível
+
+# Configurações de relatórios
+reporting_policies:
+  # Relatório de tarefas com muito atraso
+  overdue_report:
+    enabled: true
+    min_days_overdue: 2      # Mínimo de dias de atraso para incluir no relatório
+    max_tasks_per_report: 100 # Máximo de tarefas por relatório
+    filename_template: "tarefas_em_atraso_{data}_{hora}.xlsx"
+    
+    # Configurações de exportação Excel
+    excel:
+      sheet_name: "Tarefas em Atraso"
+      include_columns:
+        - "id"
+        - "titulo"
+        - "descricao"
+        - "dataVencimento"
+        - "diasAtraso"
+        - "responsavel"
+        - "departamento"
+        - "categoria"
+        - "prioridade"
+        - "status"
+      
+      # Formatação do Excel
+      formatting:
+        header_bold: true
+        auto_width: true
+        freeze_panes: true
+        highlight_critical: true  # Destacar tarefas com mais de 7 dias de atraso
+
+# Configurações de Teams
+teams_settings:
+  # Configurações de Adaptive Cards
+  adaptive_cards:
+    version: "1.5"
+    theme: "default"
+    fallback_enabled: true
+    
+    # Configurações visuais
+    visual:
+      use_icons: true
+      use_colors: true
+      compact_mode: false
+      max_tasks_per_card: 15
+  
+  # Configurações de bot
+  bot:
+    conversation_references:
+      storage_enabled: true
+      auto_cleanup: true
+      cleanup_days: 30  # Limpar referências antigas após X dias
+    
+    # Configurações de mensagens
+    messages:
+      retry_attempts: 3
+      retry_delay_seconds: 2
+      timeout_seconds: 30
+
+# Configurações de armazenamento
+storage_settings:
+  # Persistência de estado
+  state:
+    base_path: "$HOME/data/gclick_teams"  # Azure: /home/data/gclick_teams
+    auto_create_dirs: true
+    backup_enabled: true
+    backup_retention_days: 7
+  
+  # Configurações específicas por tipo
+  notification_state:
+    filename: "notification_state.json"
+    auto_save: true
+    save_interval_minutes: 5
+  
+  conversation_refs:
+    filename: "conversation_references.json"
+    auto_save: true
+    encryption_enabled: false  # Para desenvolvimento; ativar em produção
+
+# Configurações de integração G-Click
+gclick_integration:
+  # Configurações de API
+  api:
+    base_url: null  # Configurar via variáveis de ambiente
+    timeout_seconds: 30
+    retry_attempts: 3
+    retry_delay_seconds: 1
+  
+  # Configurações de webhook
+  webhook:
+    validation_enabled: true
+    signature_validation: true
+    ip_whitelist_enabled: false  # Configurar conforme necessário
+  
+  # Mapeamento de dados
+  data_mapping:
+    date_format: "%Y-%m-%d"
+    timezone_aware: true
+    required_fields:
+      - "id"
+      - "titulo"
+      - "dataVencimento"
+
 logs:
   level: INFO
   debug_http: false
+
+# Configurações de monitoramento
+monitoring:
+  # Métricas
+  metrics:
+    enabled: true
+    aggregation_interval_minutes: 60
+    retention_days: 30
+  
+  # Alertas
+  alerts:
+    enabled: true
+    critical_failure_threshold: 5  # Falhas consecutivas antes de alerta crítico
+    notification_delay_threshold_minutes: 30  # Atraso máximo aceitável
+  
+  # Health checks
+  health_checks:
+    enabled: true
+    interval_minutes: 15
+    endpoint_timeout_seconds: 10
+
+# Configurações específicas do Azure Functions
+azure_functions:
+  # Configurações de runtime
+  runtime:
+    python_version: "3.11"
+    function_timeout_minutes: 10
+    memory_mb: 512
+  
+  # Configurações de cold start
+  cold_start:
+    optimization_enabled: true
+    lazy_imports: true
+    cache_enabled: true
+  
+  # Configurações de segurança
+  security:
+    https_only: true
+    cors_enabled: true
+    cors_origins: ["*"]  # Restringir em produção
+    authentication_level: "function"  # function, admin, anonymous

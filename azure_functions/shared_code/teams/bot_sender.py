@@ -4,6 +4,7 @@ import logging
 import asyncio
 from typing import Optional
 from pathlib import Path
+from datetime import datetime
 
 from botbuilder.core import BotFrameworkAdapter, TurnContext
 from botbuilder.schema import Activity, ConversationReference, Attachment
@@ -160,16 +161,138 @@ class ConversationReferenceStorage:
         except Exception as e:
             logging.error(f"Erro ao salvar referências: {e}")
             
+    def store_conversation_reference(self, user_id: str, conversation_data: dict = None, **kwargs):
+        """
+        Armazena referência de conversa com dados estruturados e robustos.
+        
+        Args:
+            user_id: ID do usuário no Teams
+            conversation_data: Dados estruturados da conversa (nova API)
+            **kwargs: Compatibilidade com API antiga (conversation_id, service_url, etc.)
+        """
+        try:
+            if conversation_data:
+                # Nova API: dados estruturados
+                reference_data = {
+                    "user_id": user_id,
+                    "conversation_data": conversation_data,
+                    "stored_at": datetime.utcnow().isoformat(),
+                    "version": "2.0"
+                }
+            else:
+                # API de compatibilidade: construir a partir de kwargs
+                conversation_id = kwargs.get("conversation_id")
+                service_url = kwargs.get("service_url", "")
+                activity_data = kwargs.get("activity_data", {})
+                
+                if not conversation_id:
+                    logging.warning(f"conversation_id ausente para user_id={user_id}")
+                    return
+                
+                # Construir dados estruturados a partir da API antiga
+                reference_data = {
+                    "user_id": user_id,
+                    "conversation_data": {
+                        "user": {
+                            "id": user_id,
+                            "name": activity_data.get("from", {}).get("name", ""),
+                            "aad_object_id": activity_data.get("from", {}).get("aadObjectId"),
+                            "role": "user"
+                        },
+                        "conversation": {
+                            "id": conversation_id,
+                            "name": activity_data.get("conversation", {}).get("name"),
+                            "conversation_type": activity_data.get("conversation", {}).get("conversationType", "personal"),
+                            "tenant_id": activity_data.get("conversation", {}).get("tenantId")
+                        },
+                        "channel_id": activity_data.get("channelId", "msteams"),
+                        "service_url": service_url,
+                        "locale": activity_data.get("locale", "pt-BR"),
+                        "timezone": activity_data.get("timezone", "America/Sao_Paulo"),
+                        "last_activity": {
+                            "type": activity_data.get("type"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "id": activity_data.get("id")
+                        }
+                    },
+                    "stored_at": datetime.utcnow().isoformat(),
+                    "version": "2.0"
+                }
+            
+            # Armazenar usando novo formato
+            self.references[user_id] = reference_data
+            self.save()
+            logging.info(f"ConversationReference robusta armazenada para user_id={user_id}")
+            
+        except Exception as e:
+            logging.error(f"Erro ao armazenar ConversationReference para {user_id}: {e}")
+
+    def get_conversation_reference(self, user_id: str):
+        """
+        Obtém referência de conversa por ID, compatível com formatos antigo e novo.
+        
+        Args:
+            user_id: ID do usuário no Teams
+            
+        Returns:
+            dict ou ConversationReference: Dados da conversa ou None se não encontrado
+        """
+        ref_data = self.references.get(user_id)
+        if not ref_data:
+            return None
+            
+        # Verificar se é formato novo (v2.0)
+        if isinstance(ref_data, dict) and ref_data.get("version") == "2.0":
+            return ref_data["conversation_data"]
+        
+        # Formato antigo ou ConversationReference object
+        return ref_data
+        
     def add(self, user_id, reference):
-        """Adiciona/atualiza referência e salva."""
+        """Adiciona/atualiza referência e salva (compatibilidade com API antiga)."""
         # Armazena a referência original (ConversationReference ou dict)
         self.references[user_id] = reference
         self.save()
         logging.info(f"Referência adicionada para user_id={user_id}")
         
     def get(self, user_id):
-        """Obtém referência por ID."""
-        return self.references.get(user_id)
+        """Obtém referência por ID (compatibilidade com API antiga)."""
+        ref_data = self.references.get(user_id)
+        if not ref_data:
+            return None
+            
+        # Para compatibilidade, retornar dados da conversa se for formato novo
+        if isinstance(ref_data, dict) and ref_data.get("version") == "2.0":
+            # Tentar reconstruir ConversationReference a partir dos dados estruturados
+            try:
+                conv_data = ref_data["conversation_data"]
+                conversation = conv_data.get("conversation", {})
+                user = conv_data.get("user", {})
+                
+                # Criar ConversationReference básico para compatibilidade
+                cref_dict = {
+                    "user": {
+                        "id": user.get("id"),
+                        "name": user.get("name"),
+                        "aadObjectId": user.get("aad_object_id")
+                    },
+                    "conversation": {
+                        "id": conversation.get("id"),
+                        "name": conversation.get("name"),
+                        "conversationType": conversation.get("conversation_type", "personal"),
+                        "tenantId": conversation.get("tenant_id")
+                    },
+                    "channelId": conv_data.get("channel_id", "msteams"),
+                    "serviceUrl": conv_data.get("service_url", ""),
+                    "locale": conv_data.get("locale", "pt-BR")
+                }
+                return cref_dict
+            except Exception as e:
+                logging.warning(f"Erro ao converter formato novo para antigo: {e}")
+                return ref_data
+        
+        # Formato antigo
+        return ref_data
         
     def list_users(self):
         """Lista todos os user_ids com referências salvas."""

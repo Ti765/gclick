@@ -1,17 +1,53 @@
 """
-Módulo de utilitários para tratamento robusto de erros e execução em lote.
+Módulo de utilitários para tratamento robusto de erros, execução em lote e resilience.
 
 Fornece funções para executar operações em lote com tratamento de erro,
-logging adequado e capacidade de continuar execução mesmo com falhas parciais.
+logging adequado, rate limiting, circuit breaker e retry policies.
 """
 
+import os
 import logging
 import asyncio
-from typing import List, Tuple, Callable, Any, Optional, Union
-from functools import wraps
 import time
+import random
+import functools
+from functools import wraps
+from typing import List, Tuple, Callable, Any, Optional, Union
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+class CircuitState(Enum):
+    """Estados do Circuit Breaker."""
+    CLOSED = "closed"      # Funcionamento normal
+    OPEN = "open"          # Falhas detectadas, bloqueando requests
+    HALF_OPEN = "half_open"  # Testando se serviço se recuperou
+
+@dataclass
+class RateLimitConfig:
+    """Configuração de rate limiting."""
+    requests_per_second: float = 10.0
+    burst_capacity: int = 20
+    window_size_seconds: int = 60
+
+@dataclass
+class CircuitBreakerConfig:
+    """Configuração do circuit breaker."""
+    failure_threshold: int = 5
+    recovery_timeout_seconds: int = 60
+    half_open_max_calls: int = 3
+    success_threshold: int = 2
+
+@dataclass
+class RetryConfig:
+    """Configuração de retry."""
+    max_attempts: int = 3
+    base_delay_seconds: float = 1.0
+    max_delay_seconds: float = 30.0
+    exponential_base: float = 2.0
+    jitter: bool = True
 
 def safe_execute_batch(functions: List[Tuple[Callable, tuple, dict]], continue_on_error: bool = True) -> List[Tuple[bool, Any, Optional[Exception]]]:
     """
@@ -281,36 +317,202 @@ async def example_resilient_notification_batch(user_notifications: List[dict]):
         else:
             func = bot_sender.send_message
             args = (user_id, message)
-            
-        notification_functions.append((func, args, {}))
+        
+        kwargs = {}
+        notification_functions.append((func, args, kwargs))
     
-    # Executa em lote com tratamento de erro
-    try:
-        results = await safe_execute_batch_async(
-            notification_functions,
-            continue_on_error=True,
-            max_concurrent=3  # Limita para não sobrecarregar Teams API
-        )
+    # Executar em lote usando o safe_execute_batch existente
+    results = safe_execute_batch(notification_functions, continue_on_error=True)
+    
+    # Processar resultados para retornar estatísticas
+    successful = sum(1 for success, _, _ in results if success)
+    failed = len(results) - successful
+    
+    logger.info(f"Notificações enviadas: {successful} sucesso, {failed} falhas")
+    
+    return {
+        "sent": successful,
+        "failed": failed,
+        "total": len(results),
+        "details": results
+    }
+
+# =============================================================
+# SISTEMA DE RESILIENCE P2 - RATE LIMITING & CIRCUIT BREAKER
+# =============================================================
+
+class RateLimiter:
+    """Rate limiter usando token bucket algorithm."""
+    
+    def __init__(self, config: RateLimitConfig):
+        self.config = config
+        self.tokens = config.burst_capacity
+        self.last_update = time.time()
+        self.requests_count = 0
+        self.window_start = time.time()
         
-        # Processa resultados
-        successful_notifications = sum(1 for success, _, _ in results if success)
-        failed_notifications = len(results) - successful_notifications
+        logger.info("⏱️ Rate limiter configurado: %.1f req/s, burst=%d", 
+                   config.requests_per_second, config.burst_capacity)
+    
+    def can_proceed(self) -> bool:
+        """Verifica se request pode prosseguir."""
+        now = time.time()
+        elapsed = now - self.last_update
+        self.last_update = now
         
-        logger.info(f"Lote de notificações processado: {successful_notifications} enviadas, {failed_notifications} falharam")
+        # Reabastecimento de tokens
+        tokens_to_add = elapsed * self.config.requests_per_second
+        self.tokens = min(self.config.burst_capacity, self.tokens + tokens_to_add)
         
-        # Registra erros no contador global
-        for i, (success, result, error) in enumerate(results):
-            if not success:
-                user_id = user_notifications[i]["user_id"]
-                log_error_and_count("notification_send_failed", error, f"user_id={user_id}")
+        if self.tokens >= 1.0:
+            self.tokens -= 1.0
+            self.requests_count += 1
+            return True
         
+        logger.warning("🚫 Rate limit atingido: %.1f tokens restantes", self.tokens)
+        return False
+    
+    def get_stats(self) -> dict:
+        """Retorna estatísticas do rate limiter."""
         return {
-            "total": len(results),
-            "successful": successful_notifications,
-            "failed": failed_notifications,
-            "results": results
+            "tokens_available": round(self.tokens, 2),
+            "requests_in_window": self.requests_count,
+            "rate_limit": self.config.requests_per_second
         }
+
+class CircuitBreaker:
+    """Circuit breaker para proteger contra falhas em cascata."""
+    
+    def __init__(self, name: str, config: CircuitBreakerConfig):
+        self.name = name
+        self.config = config
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = 0
         
-    except Exception as e:
-        log_error_and_count("notification_batch_failed", e, f"batch_size={len(user_notifications)}")
-        raise
+        logger.info("🔌 Circuit breaker '%s' inicializado", name)
+    
+    def can_execute(self) -> bool:
+        """Verifica se pode executar operação."""
+        if self.state == CircuitState.CLOSED:
+            return True
+        
+        if self.state == CircuitState.OPEN:
+            if time.time() - self.last_failure_time >= self.config.recovery_timeout_seconds:
+                self.state = CircuitState.HALF_OPEN
+                logger.info("🔄 Circuit breaker '%s' mudou para HALF_OPEN", self.name)
+                return True
+            return False
+        
+        return True  # HALF_OPEN allows execution
+    
+    def on_success(self):
+        """Registra sucesso na operação."""
+        if self.state == CircuitState.HALF_OPEN:
+            self.success_count += 1
+            if self.success_count >= self.config.success_threshold:
+                self.state = CircuitState.CLOSED
+                self.failure_count = 0
+                logger.info("✅ Circuit breaker '%s' FECHADO", self.name)
+        elif self.state == CircuitState.CLOSED:
+            self.failure_count = max(0, self.failure_count - 1)
+    
+    def on_failure(self):
+        """Registra falha na operação."""
+        self.last_failure_time = time.time()
+        self.failure_count += 1
+        
+        if self.failure_count >= self.config.failure_threshold:
+            self.state = CircuitState.OPEN
+            logger.warning("🚨 Circuit breaker '%s' ABERTO (%d falhas)", 
+                         self.name, self.failure_count)
+    
+    def get_stats(self) -> dict:
+        """Retorna estatísticas do circuit breaker."""
+        return {
+            "name": self.name,
+            "state": self.state.value,
+            "failure_count": self.failure_count,
+            "can_execute": self.can_execute()
+        }
+
+class ResilienceManager:
+    """Gerenciador central de resilience."""
+    
+    def __init__(self):
+        self.rate_limiter = RateLimiter(RateLimitConfig(
+            requests_per_second=float(os.getenv("RATE_LIMIT_RPS", "10")),
+            burst_capacity=int(os.getenv("RATE_LIMIT_BURST", "20"))
+        ))
+        
+        self.circuit_breakers = {}
+        self._setup_circuit_breakers()
+        
+        logger.info("🛡️ Resilience manager inicializado")
+    
+    def _setup_circuit_breakers(self):
+        """Configura circuit breakers para diferentes serviços."""
+        services = ["gclick_api", "teams_bot", "storage"]
+        
+        for service in services:
+            config = CircuitBreakerConfig(
+                failure_threshold=int(os.getenv(f"CB_{service.upper()}_THRESHOLD", "5")),
+                recovery_timeout_seconds=int(os.getenv(f"CB_{service.upper()}_TIMEOUT", "60"))
+            )
+            self.circuit_breakers[service] = CircuitBreaker(service, config)
+    
+    def get_circuit_breaker(self, service: str) -> CircuitBreaker:
+        """Obtém circuit breaker para um serviço específico."""
+        if service not in self.circuit_breakers:
+            config = CircuitBreakerConfig()
+            self.circuit_breakers[service] = CircuitBreaker(service, config)
+        return self.circuit_breakers[service]
+    
+    def can_execute(self, service: str = "default", check_rate_limit: bool = True) -> bool:
+        """Verifica se operação pode ser executada."""
+        if check_rate_limit and not self.rate_limiter.can_proceed():
+            return False
+        
+        circuit_breaker = self.get_circuit_breaker(service)
+        return circuit_breaker.can_execute()
+    
+    def on_success(self, service: str = "default"):
+        """Registra sucesso de operação."""
+        circuit_breaker = self.get_circuit_breaker(service)
+        circuit_breaker.on_success()
+    
+    def on_failure(self, service: str = "default"):
+        """Registra falha de operação."""
+        circuit_breaker = self.get_circuit_breaker(service)
+        circuit_breaker.on_failure()
+    
+    def get_stats(self) -> dict:
+        """Retorna estatísticas completas."""
+        return {
+            "rate_limiter": self.rate_limiter.get_stats(),
+            "circuit_breakers": {
+                name: cb.get_stats() 
+                for name, cb in self.circuit_breakers.items()
+            }
+        }
+
+# Instância global do resilience manager
+resilience_manager = ResilienceManager()
+
+def resilient(service: str = "default", check_rate_limit: bool = True):
+    """Decorator para aplicar resilience a funções."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            if not resilience_manager.can_execute(service, check_rate_limit):
+                raise Exception(f"Resilience check failed for service: {service}")
+            
+            try:
+                result = func(*args, **kwargs)
+                resilience_manager.on_success(service)
+                return result
+            except Exception as e:
+                resilience_manager.on_failure(service)
+                raise
+        return wrapper
+    return decorator
