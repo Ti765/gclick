@@ -45,6 +45,11 @@ class BotSender:
         Returns:
             bool: True se enviado com sucesso, False caso contrário
         """
+        # Verificar se conversation_storage está disponível
+        if not self.conversation_storage:
+            self.logger.warning(f"ConversationStorage não configurado - não é possível enviar para {user_id}")
+            return False
+            
         # Usa o storage em tempo real, não uma cópia
         cref_data = self.conversation_storage.get(user_id)
         if not cref_data:
@@ -125,22 +130,31 @@ class ConversationReferenceStorage:
             project_root = Path(__file__).parent.parent
             file_path = project_root / "storage" / "conversation_references.json"
         self.file_path = file_path
+        self.logger = logging.getLogger("ConversationReferenceStorage")
+        self.logger.info("🗂️  Inicializando storage em: %s", self.file_path)
         self.references = self._load()
+        self.logger.info("🗂️  Storage inicializado com %d referências", len(self.references))
         
     def _load(self):
         """Carrega referências do arquivo."""
         path = Path(self.file_path)
+        self.logger.info("🗂️  Tentando carregar de: %s (existe: %s)", path, path.exists())
         if path.exists():
             try:
                 with open(path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    data = json.load(f)
+                self.logger.info("🗂️  Carregadas %d referências do arquivo", len(data))
+                return data
             except Exception as e:
-                logging.error(f"Erro ao carregar referências: {e}")
+                self.logger.error("💥 Erro ao carregar referências: %s", e)
+        else:
+            self.logger.info("🗂️  Arquivo não existe, inicializando storage vazio")
         return {}
         
     def save(self):
         """Salva referências no arquivo com serialização correta."""
         path = Path(self.file_path)
+        self.logger.info("💾 Salvando %d referências em: %s", len(self.references), path)
         os.makedirs(path.parent, exist_ok=True)
         
         try:
@@ -157,9 +171,9 @@ class ConversationReferenceStorage:
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(serializable_refs, f, indent=2, ensure_ascii=False)
                 
-            logging.info(f"Referências salvas: {len(serializable_refs)} entries em {self.file_path}")
+            self.logger.info("✅ Referências salvas: %d entries em %s", len(serializable_refs), self.file_path)
         except Exception as e:
-            logging.error(f"Erro ao salvar referências: {e}")
+            self.logger.error("💥 Erro ao salvar referências: %s", e, exc_info=True)
             
     def store_conversation_reference(self, user_id: str, conversation_data: dict = None, **kwargs):
         """
@@ -170,6 +184,7 @@ class ConversationReferenceStorage:
             conversation_data: Dados estruturados da conversa (nova API)
             **kwargs: Compatibilidade com API antiga (conversation_id, service_url, etc.)
         """
+        self.logger.info("💾 store_conversation_reference chamado para user_id=%s", user_id)
         try:
             if conversation_data:
                 # Nova API: dados estruturados
@@ -222,10 +237,10 @@ class ConversationReferenceStorage:
             # Armazenar usando novo formato
             self.references[user_id] = reference_data
             self.save()
-            logging.info(f"ConversationReference robusta armazenada para user_id={user_id}")
+            self.logger.info("✅ ConversationReference robusta armazenada para user_id=%s", user_id)
             
         except Exception as e:
-            logging.error(f"Erro ao armazenar ConversationReference para {user_id}: {e}")
+            self.logger.error("💥 Erro ao armazenar ConversationReference para %s: %s", user_id, e, exc_info=True)
 
     def get_conversation_reference(self, user_id: str):
         """
@@ -297,6 +312,10 @@ class ConversationReferenceStorage:
     def list_users(self):
         """Lista todos os user_ids com referências salvas."""
         return list(self.references.keys())
+    
+    def list_all_references(self):
+        """Lista todas as referências de conversa com metadados."""
+        return dict(self.references)
         
     def remove(self, user_id):
         """Remove referência de um usuário."""
