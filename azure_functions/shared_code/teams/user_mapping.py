@@ -1,5 +1,29 @@
 """
-Módulo compartilhado para mapeamento de usuários G-Click para Teams IDs.
+Módulo compartilhado para def mapear_apelido_para_teams_id(apelido: str) -> Optional[str]:
+    """
+    Mapeia um apelido do G-Click para um ID do Teams.
+    
+    Quando TEST_MODE=true, redireciona TODAS as notificações para o ID de teste,
+    independente do responsável original. Isso permite testar o sistema completo
+    sem enviar notificações para os usuários reais.
+    
+    Args:
+        apelido: Apelido do usuário no G-Click (ex: "mauricio.bernej")
+        
+    Returns:
+        Optional[str]: ID do Teams correspondente ou None se não encontrado
+        
+    Example:
+        >>> # Modo normal
+        >>> mapear_apelido_para_teams_id("mauricio.bernej")
+        "4a5a678b-f3c1-4a7d-af41-1b97686a0b6b"
+        
+    """
+    # ✅ OVERRIDE para testes - redirecionar TUDO para o Teams ID de teste
+    force_teams_id = os.getenv("FORCE_ALL_TO_TEAMS_ID")
+    if force_teams_id:
+        logger.info("🔄 TESTE: Redirecionando '%s' → %s", apelido, force_teams_id)
+        return force_teams_idos G-Click para Teams IDs.
 
 Este módulo centraliza a lógica de mapeamento de apelidos do G-Click para IDs do Teams,
 incluindo suporte ao modo de teste onde todas as notificações são redirecionadas
@@ -56,14 +80,19 @@ def mapear_apelido_para_teams_id(apelido: str) -> Optional[str]:
         logger.warning("Apelido vazio fornecido para mapeamento")
         return None
         
-    # Verificar se estamos em modo de teste
+    # Verificar se estamos em modo de teste/restrição
     test_mode = os.environ.get("TEST_MODE", "false").lower() in ("true", "1", "yes")
-    test_user_id = os.environ.get("TEST_USER_TEAMS_ID", "4a5a678b-f3c1-4a7d-af41-1b97686a0b6b")
+    test_user_id = os.environ.get("TEST_USER_TEAMS_ID", "")
+    test_user_name = os.environ.get("TEST_USER_NAME", "Usuário de Teste")
     
     # Se estiver em modo de teste, redirecionar TODAS as notificações para o usuário de teste
     if test_mode:
-        logger.info(f"[TEST_MODE] Redirecionando notificação de '{apelido}' para usuário de teste: {test_user_id}")
-        return test_user_id
+        if test_user_id:
+            logger.info(f"🧪 [TEST_MODE] Redirecionando '{apelido}' para {test_user_name} ({test_user_id})")
+            return test_user_id
+        else:
+            logger.error(f"❌ [TEST_MODE] Ativo mas TEST_USER_TEAMS_ID não configurado!")
+            return None
     
     # Verificar primeiro no mapeamento fixo
     result = _GCLICK_TO_TEAMS.get(apelido.lower())

@@ -26,8 +26,12 @@ APP_VERSION = "2.2.0"
 
 # Flags de ambiente e configuração dinâmica
 DEBUG_MOCK = os.getenv("DEBUG_MOCK", "false").lower() == "true"
-# Verdadeiro apenas quando estiver hospedado no Azure App Service / Functions
-IS_AZURE = bool(os.getenv("WEBSITE_INSTANCE_ID"))
+# Detecção robusta de ambiente Azure (múltiplas variáveis)
+IS_AZURE = bool(
+    os.getenv("WEBSITE_INSTANCE_ID") or 
+    os.getenv("WEBSITE_SITE_NAME") or 
+    os.getenv("FUNCTIONS_WORKER_RUNTIME") and os.getenv("AzureWebJobsStorage", "").startswith("DefaultEndpointsProtocol=https")
+)
 
 # (opcional) helper que pode ser útil em logs e ramificações
 IS_LOCAL = not IS_AZURE
@@ -58,46 +62,25 @@ logger.info("🎛️  Features habilitadas: %s", [k for k, v in FEATURES.items()
 logger.info("⚙️  Configurações: timezone=%s, locale=%s", CONFIG["timezone"], CONFIG["locale"])
 
 # ─────────────────────────────────────────────────────────────
-# IMPORTS DO PROJETO (robustos: tenta direto e com prefixo shared_code)
+# IMPORTS DO PROJETO - SEMPRE VIA shared_code (elimina ambiguidade)
 # ─────────────────────────────────────────────────────────────
 try:
-    try:
-        # Estilo quando shared_code está no sys.path
-        from teams.user_mapping import mapear_apelido_para_teams_id  # type: ignore
-        from teams.bot_sender import BotSender, ConversationReferenceStorage  # type: ignore
-        from engine.notification_engine import run_notification_cycle  # type: ignore
-        import_style = "plain"
-    except ImportError:
-        # Estilo alternativo se o ambiente exige prefixo explícito
-        from shared_code.teams.user_mapping import mapear_apelido_para_teams_id  # type: ignore
-        from shared_code.teams.bot_sender import BotSender, ConversationReferenceStorage  # type: ignore
-        from shared_code.engine.notification_engine import run_notification_cycle  # type: ignore
-        import_style = "shared_code"
-
-    logger.info("✅  Módulos do projeto importados (%s)", import_style)
+    # ✅ SEMPRE usar shared_code.* para evitar colisão com pacote 'teams' do PyPI
+    from shared_code.teams.user_mapping import mapear_apelido_para_teams_id
+    from shared_code.teams.bot_sender import BotSender, ConversationReferenceStorage
+    from shared_code.engine.notification_engine import run_notification_cycle
+    
+    # ✅ VERIFICAÇÃO DE SANIDADE: garantir que é a classe REAL
+    if not hasattr(ConversationReferenceStorage, "store_conversation_reference"):
+        raise ImportError("ConversationReferenceStorage importada é STUB - método ausente!")
+    
+    import_style = "shared_code"
+    logger.info("✅ Imports shared_code OK - ConversationReferenceStorage REAL carregada")
+    
 except Exception as imp_err:
-    logger.critical("❌  Falha nos imports do projeto: %s", imp_err, exc_info=True)
-
-    # Erros de importação podem impedir a indexação; stubs mantêm o app carregável.
-    def mapear_apelido_para_teams_id(*_args, **_kwargs):
-        logger.error("mapear_apelido_para_teams_id indisponível")
-        return None
-
-    class ConversationReferenceStorage:  # type: ignore
-        def __init__(self, file_path: str = ""):
-            self.file_path = file_path
-            self._data = {}
-
-        def list_users(self):
-            return list(self._data.keys())
-
-    class BotSender:  # type: ignore
-        def __init__(self, *_args, **_kwargs):
-            self.conversation_storage = ConversationReferenceStorage()
-
-    def run_notification_cycle(*_args, **_kwargs):
-        logger.error("run_notification_cycle indisponível")
-        return {}
+    logger.critical("❌ FALHA CRÍTICA nos imports: %s", imp_err, exc_info=True)
+    # ❌ NÃO usar stubs - falhar rapidamente é melhor que estado inconsistente
+    raise SystemExit(f"Deploy inválido - imports falharam: {imp_err}")
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG AZURE FUNCTIONS APP
@@ -178,8 +161,14 @@ if FEATURES["teams_bot"] and APP_ID and APP_PASSWORD:
         storage_path = storage_base / "conversation_references.json"
 
         # Inicializar armazenamento robusto apenas se feature habilitada
+        conversation_storage = None
         if FEATURES["conversation_storage"]:
             conversation_storage = ConversationReferenceStorage(str(storage_path))
+            # Verificar se a classe real foi importada
+            if hasattr(conversation_storage, 'store_conversation_reference'):
+                logger.info("✅ ConversationReferenceStorage REAL inicializada")
+            else:
+                logger.error("❌ ConversationReferenceStorage STUB sendo usada!")
         
         # Inicializar BotSender com configuração completa
         bot_sender = BotSender(adapter, APP_ID, conversation_storage)
@@ -228,7 +217,8 @@ def _run_cycle(period: str, dias_proximos: int, full_scan: bool):
         logger.info("⏭️  Notification engine desabilitado via feature flag")
         return {"status": "disabled", "period": period}
         
-    exec_mode = "live" if os.getenv("SIMULACAO", "true").lower() == "false" else "dry_run"
+    # Modo produção por padrão - apenas dry_run se explicitamente configurado
+    exec_mode = "dry_run" if os.getenv("SIMULACAO", "false").lower() == "true" else "live"
     logger.info("⏳  run_notification_cycle(%s) → modo=%s, dias=%s, timezone=%s", 
                period, exec_mode, dias_proximos, CONFIG["timezone"])
     
@@ -442,6 +432,10 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                 service_url = body.get("serviceUrl", "")
                 channel_id = body.get("channelId", "msteams")
                 
+                # 🔍 LOG DETALHADO para debug da captura de Teams ID
+                logger.info("🔍 DETALHES DA CAPTURA - user_id: %s, user_name: %s, conversation_id: %s, service_url: %s", 
+                           user_id, user_name, conversation_id, service_url)
+                
                 if user_id and conversation_id:
                     # Caminho normal: payload real vindo do Teams
                     conversation_data = {
@@ -469,15 +463,19 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                     }
                     
                     # Armazenar usando nova API robusta
-                    conversation_storage.store_conversation_reference(
-                        user_id=user_id,
-                        conversation_data=conversation_data
-                    )
-                    stored = True
-                    logger.debug("💾 ConversationReference robusto armazenado para user=%s", user_id)
+                    # ✅ VERIFICAÇÃO DEFENSIVA antes de chamar
+                    store_method = getattr(conversation_storage, "store_conversation_reference", None)
+                    if callable(store_method):
+                        store_method(user_id=user_id, conversation_data=conversation_data)
+                        stored = True
+                        logger.info("✅ ConversationReference armazenada para %s (%s)", user_name, user_id)
+                    else:
+                        logger.error("❌ conversation_storage é STUB - método store_conversation_reference ausente!")
+                        logger.error("❌ Tipo: %s, Métodos: %s", type(conversation_storage), dir(conversation_storage))
                     
                 # Fallback DEV: sem conversation.id, mas com from.id (não funciona para envio real)
                 elif user_id and not IS_AZURE:
+                    logger.warning("⚠️  MODO DEV: conversation_id ausente, usando fallback dev-conversation")
                     conversation_data = {
                         "user": {
                             "id": user_id,
@@ -502,25 +500,43 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                         }
                     }
                     
-                    conversation_storage.store_conversation_reference(
-                        user_id=user_id,
-                        conversation_data=conversation_data
-                    )
-                    stored = True
-                    logger.info("💾 ConversationReference DEV (stub) armazenado para %s", user_id)
+                    # ✅ VERIFICAÇÃO DEFENSIVA antes de chamar (modo DEV)
+                    store_method = getattr(conversation_storage, "store_conversation_reference", None)
+                    if callable(store_method):
+                        store_method(user_id=user_id, conversation_data=conversation_data)
+                        stored = True
+                        logger.info("✅ ConversationReference DEV armazenada para %s (%s)", user_name, user_id)
+                    else:
+                        logger.error("❌ conversation_storage é STUB no modo DEV!")
+                else:
+                    logger.warning("❌ CAPTURA FALHOU: user_id=%s, conversation_id=%s, IS_AZURE=%s", 
+                                   user_id, conversation_id, IS_AZURE)
                     
             except Exception as storage_err:
-                logger.warning("⚠️ Falha ao armazenar ConversationReference: %s", storage_err)
+                logger.error("💥 ERRO ao armazenar ConversationReference: %s", storage_err, exc_info=True)
+        else:
+            logger.info("ℹ️  ConversationStorage desabilitado ou indisponível")
+
+        # 📊 LOG FINAL do resultado da captura
+        if stored:
+            logger.info("✅ Teams ID capturado com sucesso!")
+        else:
+            logger.warning("⚠️  Teams ID NÃO foi capturado nesta mensagem")
 
         # 1) Universal Actions (invoke/adaptiveCard/action)
         if msg_type == "invoke" and name in ("adaptiveCard/action", "task/submit"):
             logger.info("🎯 Processando payload 'invoke' de Adaptive Card")
             return _process_card_action(body)
 
-        # 2) Mensagem normal com 'value' (alguns clientes do Teams)
-        if msg_type == "message" and ("value" in body or "channelData" in body):
-            logger.info("💬 Processando payload 'message' com 'value'")
-            return _process_card_action(body)
+        # 2) Mensagem normal com 'value' apenas se for realmente um card action
+        if msg_type == "message" and "value" in body:
+            # Verificar se realmente é um card action antes de processar
+            value_data = body.get("value", {})
+            if isinstance(value_data, dict) and ("action" in value_data or "taskId" in value_data):
+                logger.info("💬 Processando payload 'message' com card action")
+                return _process_card_action(body)
+            else:
+                logger.debug("💬 Mensagem com 'value' mas não é card action, tratando como mensagem normal")
 
         # 3) Mensagem de texto simples ou instalação de bot
         if msg_type == "message":
@@ -964,6 +980,82 @@ def http_trigger(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Erro interno", status_code=500)
 
 # ─────────────────────────────────────────────────────────────
+# HTTP — Capturar Teams ID do usuário
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="CaptureTeamsId")
+@app.route(route="debug/capture-teams-id", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def capture_teams_id(req: func.HttpRequest) -> func.HttpResponse:
+    """
+    Endpoint para capturar e listar todos os Teams IDs que interagiram com o bot.
+    Use este endpoint para descobrir seu Teams ID após enviar mensagens ao bot.
+    """
+    if not FEATURES["debug_endpoints"]:
+        return func.HttpResponse("Debug endpoints desabilitados", status_code=503)
+        
+    try:
+        conversation_list = []
+        
+        logger.info("🔍 /debug/capture-teams-id acessado - bot_sender=%s, conversation_storage=%s", 
+                   bool(bot_sender), bool(conversation_storage))
+        
+        if bot_sender and conversation_storage:
+            try:
+                logger.info("🔍 Tentando listar conversas armazenadas...")
+                # Tentar método principal
+                if hasattr(conversation_storage, 'list_all_references'):
+                    all_refs = conversation_storage.list_all_references()
+                    logger.info("🔍 Encontradas %d referências", len(all_refs))
+                    for user_id, ref_data in all_refs.items():
+                        user_info = ref_data.get("user", {}) if isinstance(ref_data, dict) else {}
+                        conversation_list.append({
+                            "teams_id": user_id,
+                            "user_name": user_info.get("name", "N/A"),
+                            "last_activity": ref_data.get("timestamp", "N/A") if isinstance(ref_data, dict) else "N/A"
+                        })
+                else:
+                    # Fallback para estruturas internas
+                    logger.info("🔍 Usando fallback para estruturas internas...")
+                    for attr in ("_conversations", "references", "_data"):
+                        if hasattr(conversation_storage, attr):
+                            raw_data = getattr(conversation_storage, attr)
+                            logger.info("🔍 Atributo %s encontrado com %d items", attr, len(raw_data) if isinstance(raw_data, dict) else 0)
+                            if isinstance(raw_data, dict):
+                                for user_id, data in raw_data.items():
+                                    conversation_list.append({
+                                        "teams_id": user_id,
+                                        "user_name": "Dados internos",
+                                        "last_activity": "N/A"
+                                    })
+                                break
+            except Exception as e:
+                logger.error("💥 Erro ao listar conversas: %s", e, exc_info=True)
+        else:
+            logger.warning("⚠️  bot_sender=%s, conversation_storage=%s - pelo menos um está indisponível", 
+                          bool(bot_sender), bool(conversation_storage))
+        
+        return _json({
+            "conversations_found": len(conversation_list),
+            "conversations": conversation_list,
+            "instructions": {
+                "step_1": "Envie uma mensagem qualquer ao bot no Teams",
+                "step_2": "Acesse este endpoint novamente para ver seu Teams ID",
+                "step_3": "Use o Teams ID na configuração TEST_USER_TEAMS_ID",
+                "note": "⚠️  Localmente, Teams ID nunca será capturado. Deploy no Azure é necessário!"
+            },
+            "storage_configured": bool(conversation_storage),
+            "is_azure": IS_AZURE,
+            "features_enabled": {
+                "conversation_storage": FEATURES["conversation_storage"],
+                "teams_bot": FEATURES["teams_bot"]
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+    except Exception:
+        logger.exception("Erro em /debug/capture-teams-id")
+        return func.HttpResponse("Erro interno", status_code=500)
+
+# ─────────────────────────────────────────────────────────────
 # HTTP — Health check
 # ─────────────────────────────────────────────────────────────
 @app.function_name(name="HealthCheck")
@@ -995,9 +1087,42 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
             "user_mapping": mapping_status,
             "timestamp": datetime.utcnow().isoformat(),
             "functions_detected": {
-                "total": 7,
-                "http_endpoints": 5,
+                "total": 8,
+                "http_endpoints": 6,
                 "timer_triggers": 2,
             },
         }
     )
+
+# ─────────────────────────────────────────────────────────────
+# HTTP — Executar ciclo manualmente para testes
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="RunCycleNow")
+@app.route(route="run-cycle", methods=["POST", "GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def run_cycle_now(req: func.HttpRequest) -> func.HttpResponse:
+    """Executar ciclo de notificações manualmente para testes"""
+    
+    # ✅ Segurança básica
+    secret = os.getenv("RUN_CYCLE_SECRET", "test123")
+    provided_secret = req.headers.get("X-Run-Secret") or req.params.get("secret")
+    
+    if provided_secret != secret:
+        return func.HttpResponse("❌ Forbidden - X-Run-Secret inválido", status_code=403)
+    
+    try:
+        dias = int(req.params.get("dias", CONFIG.get("dias_proximos_morning", 3)))
+        full = req.params.get("full", "true").lower() == "true"
+        
+        logger.info("🚀 Executando ciclo manual: dias=%d, full_scan=%s", dias, full)
+        result = _run_cycle("manual", dias_proximos=dias, full_scan=full)
+        
+        return _json({
+            "status": "success", 
+            "message": "Ciclo executado com sucesso",
+            "result": result,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error("💥 Erro no ciclo manual: %s", e, exc_info=True)
+        return _json({"status": "error", "message": str(e)}, status=500)
