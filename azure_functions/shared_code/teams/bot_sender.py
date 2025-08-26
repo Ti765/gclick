@@ -32,6 +32,21 @@ class BotSender:
         self.app_id = app_id
         self.conversation_storage = conversation_storage  # Storage object, não dict
         self.logger = logging.getLogger("BotSender")
+        
+        # Validações robustas no construtor
+        if not self.adapter:
+            self.logger.error("❌ BotFrameworkAdapter não fornecido!")
+            
+        if not self.app_id:
+            self.logger.warning("⚠️ app_id não fornecido - mensagens proativas podem falhar")
+            
+        if self.conversation_storage:
+            if hasattr(self.conversation_storage, 'store_conversation_reference'):
+                self.logger.info("✅ ConversationReferenceStorage VÁLIDO conectado ao BotSender")
+            else:
+                self.logger.error("❌ ConversationReferenceStorage INVÁLIDO - métodos ausentes!")
+        else:
+            self.logger.warning("⚠️ ConversationReferenceStorage não fornecido - funcionalidade limitada")
     
     async def send_message(self, user_id: str, message: str, card_json: Optional[str] = None) -> bool:
         """
@@ -121,6 +136,23 @@ class BotSender:
         """
         return await self.send_message(user_id, fallback_message, card_json)
 
+    def send_direct_message(self, activity_body: dict, text: str) -> None:
+        """Apenas um wrapper síncrono para enviar resposta direta ao autor da activity."""
+        try:
+            user_id = (activity_body or {}).get("from", {}).get("id")
+            if not user_id:
+                self.logger.warning("send_direct_message: from.id ausente no payload")
+                return
+            
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.send_message(user_id, text))
+            else:
+                loop.run_until_complete(self.send_message(user_id, text))
+        except Exception as e:
+            self.logger.error(f"send_direct_message falhou: {e}", exc_info=True)
+
 class ConversationReferenceStorage:
     """Armazenamento persistente para referências de conversação."""
     
@@ -152,28 +184,70 @@ class ConversationReferenceStorage:
         return {}
         
     def save(self):
-        """Salva referências no arquivo com serialização correta."""
+        """Salva referências no arquivo com serialização correta e tratamento de erro robusto."""
         path = Path(self.file_path)
         self.logger.info("💾 Salvando %d referências em: %s", len(self.references), path)
-        os.makedirs(path.parent, exist_ok=True)
         
         try:
+            # Garantir que o diretório pai existe
+            os.makedirs(path.parent, exist_ok=True)
+            
             # Serializa ConversationReference objects para dict antes de salvar
             serializable_refs = {}
             for user_id, cref in self.references.items():
-                if hasattr(cref, 'serialize'):
-                    # É um ConversationReference object
-                    serializable_refs[user_id] = cref.serialize()
-                else:
-                    # Já é um dict
-                    serializable_refs[user_id] = cref
+                try:
+                    if hasattr(cref, 'serialize') and callable(getattr(cref, 'serialize')):
+                        # É um ConversationReference object com método serialize
+                        serializable_refs[user_id] = cref.serialize()
+                        self.logger.debug("🔄 Serializado ConversationReference para user_id=%s", user_id)
+                    elif isinstance(cref, dict):
+                        # Já é um dict - verificar se é válido
+                        serializable_refs[user_id] = cref
+                        self.logger.debug("📋 Dict mantido para user_id=%s", user_id)
+                    else:
+                        # Tipo desconhecido - tentar converter para dict
+                        self.logger.warning("⚠️ Tipo não reconhecido para user_id=%s: %s", user_id, type(cref))
+                        serializable_refs[user_id] = dict(cref) if hasattr(cref, '__dict__') else str(cref)
+                except Exception as serialize_err:
+                    self.logger.error("💥 Erro ao serializar user_id=%s: %s", user_id, serialize_err)
+                    # Pular este item em vez de falhar completamente
+                    continue
                     
+            # Salvar com backup se arquivo já existe
+            backup_path = None
+            if path.exists():
+                backup_path = path.with_suffix('.json.backup')
+                try:
+                    import shutil
+                    shutil.copy2(path, backup_path)
+                    self.logger.debug("📋 Backup criado: %s", backup_path)
+                except Exception as backup_err:
+                    self.logger.warning("⚠️ Falha ao criar backup: %s", backup_err)
+            
+            # Salvar arquivo principal
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(serializable_refs, f, indent=2, ensure_ascii=False)
+                json.dump(serializable_refs, f, indent=2, ensure_ascii=False, default=str)
                 
             self.logger.info("✅ Referências salvas: %d entries em %s", len(serializable_refs), self.file_path)
+            
+            # Remover backup se salvamento foi bem-sucedido
+            if backup_path and backup_path.exists():
+                try:
+                    backup_path.unlink()
+                    self.logger.debug("🗑️ Backup removido após salvamento bem-sucedido")
+                except Exception:
+                    pass  # Não é crítico se falhar
+                    
         except Exception as e:
-            self.logger.error("💥 Erro ao salvar referências: %s", e, exc_info=True)
+            self.logger.error("💥 Erro crítico ao salvar referências: %s", e, exc_info=True)
+            # Se falhou mas existe backup, tentar restaurar
+            if backup_path and backup_path.exists():
+                try:
+                    import shutil
+                    shutil.copy2(backup_path, path)
+                    self.logger.info("🔄 Backup restaurado após falha no salvamento")
+                except Exception as restore_err:
+                    self.logger.error("💥 Falha também na restauração do backup: %s", restore_err)
             
     def store_conversation_reference(self, user_id: str, conversation_data: dict = None, **kwargs):
         """
@@ -214,6 +288,10 @@ class ConversationReferenceStorage:
                             "aad_object_id": activity_data.get("from", {}).get("aadObjectId"),
                             "role": "user"
                         },
+                        "bot": {
+                            "id": activity_data.get("recipient", {}).get("id"),
+                            "name": activity_data.get("recipient", {}).get("name"),
+                        },
                         "conversation": {
                             "id": conversation_id,
                             "name": activity_data.get("conversation", {}).get("name"),
@@ -252,16 +330,25 @@ class ConversationReferenceStorage:
         Returns:
             dict ou ConversationReference: Dados da conversa ou None se não encontrado
         """
+        self.logger.info("🔍 get_conversation_reference chamado para user_id=%s", user_id)
         ref_data = self.references.get(user_id)
         if not ref_data:
+            self.logger.warning("⚠️  Nenhuma referência encontrada para user_id=%s", user_id)
             return None
             
-        # Verificar se é formato novo (v2.0)
-        if isinstance(ref_data, dict) and ref_data.get("version") == "2.0":
-            return ref_data["conversation_data"]
-        
-        # Formato antigo ou ConversationReference object
-        return ref_data
+        try:
+            # Verificar se é formato novo (v2.0)
+            if isinstance(ref_data, dict) and ref_data.get("version") == "2.0":
+                self.logger.info("✅ Retornando ConversationReference v2.0 para user_id=%s", user_id)
+                return ref_data["conversation_data"]
+            
+            # Formato antigo ou ConversationReference object
+            self.logger.info("✅ Retornando ConversationReference legado para user_id=%s", user_id)
+            return ref_data
+            
+        except Exception as e:
+            self.logger.error("💥 Erro ao recuperar ConversationReference para %s: %s", user_id, e, exc_info=True)
+            return None
         
     def add(self, user_id, reference):
         """Adiciona/atualiza referência e salva (compatibilidade com API antiga)."""
@@ -283,13 +370,18 @@ class ConversationReferenceStorage:
                 conv_data = ref_data["conversation_data"]
                 conversation = conv_data.get("conversation", {})
                 user = conv_data.get("user", {})
+                bot = conv_data.get("bot", {})
                 
-                # Criar ConversationReference básico para compatibilidade
+                # Criar ConversationReference básico para compatibilidade (inclui bot)
                 cref_dict = {
                     "user": {
                         "id": user.get("id"),
                         "name": user.get("name"),
                         "aadObjectId": user.get("aad_object_id")
+                    },
+                    "bot": {
+                        "id": bot.get("id"),
+                        "name": bot.get("name"),
                     },
                     "conversation": {
                         "id": conversation.get("id"),

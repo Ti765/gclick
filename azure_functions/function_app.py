@@ -61,6 +61,17 @@ CONFIG = {
 logger.info("🎛️  Features habilitadas: %s", [k for k, v in FEATURES.items() if v])
 logger.info("⚙️  Configurações: timezone=%s, locale=%s", CONFIG["timezone"], CONFIG["locale"])
 
+# Validação de timezone para evitar crash local sem tzdata (Windows/DEV)
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+    _ = ZoneInfo(CONFIG.get("timezone", "UTC"))
+except Exception:
+    logger.warning(
+        "⚠️ Timezone %s indisponível neste host; usando UTC. Instale 'tzdata' no DEV.",
+        CONFIG.get("timezone"),
+    )
+    CONFIG["timezone"] = "UTC"
+
 # ─────────────────────────────────────────────────────────────
 # IMPORTS DO PROJETO - SEMPRE VIA shared_code (elimina ambiguidade)
 # ─────────────────────────────────────────────────────────────
@@ -151,24 +162,41 @@ if FEATURES["teams_bot"] and APP_ID and APP_PASSWORD:
         # Configuração de storage path persistente baseado no ambiente
         if IS_AZURE:
             # Azure Functions: usar diretório persistente $HOME/data
-            storage_base = Path(os.getenv("HOME", "/tmp")) / "data" / "gclick_teams"
+            # Múltiplas variáveis para garantir compatibilidade
+            home_dir = os.getenv("HOME") or os.getenv("USERPROFILE") or "/tmp"
+            storage_base = Path(home_dir) / "data" / "gclick_teams"
+            logger.info("🔧 Ambiente Azure detectado - usando $HOME/data: %s", storage_base)
         else:
             # Desenvolvimento local: usar diretório do projeto
             storage_base = Path(__file__).parent / "storage"
+            logger.info("🔧 Ambiente local detectado - usando storage local: %s", storage_base)
         
-        # Criar diretórios necessários
-        storage_base.mkdir(parents=True, exist_ok=True)
+        # Criar diretórios necessários com tratamento de erro robusto
+        try:
+            storage_base.mkdir(parents=True, exist_ok=True)
+            logger.info("✅ Diretório de storage criado/verificado: %s", storage_base)
+        except Exception as mkdir_err:
+            logger.error("💥 Erro ao criar diretório de storage: %s", mkdir_err)
+            # Fallback para diretório temporário
+            storage_base = Path("/tmp") / "gclick_teams_fallback"
+            storage_base.mkdir(parents=True, exist_ok=True)
+            logger.warning("⚠️ Usando fallback storage: %s", storage_base)
+            
         storage_path = storage_base / "conversation_references.json"
 
         # Inicializar armazenamento robusto apenas se feature habilitada
         conversation_storage = None
         if FEATURES["conversation_storage"]:
-            conversation_storage = ConversationReferenceStorage(str(storage_path))
-            # Verificar se a classe real foi importada
-            if hasattr(conversation_storage, 'store_conversation_reference'):
-                logger.info("✅ ConversationReferenceStorage REAL inicializada")
-            else:
-                logger.error("❌ ConversationReferenceStorage STUB sendo usada!")
+            try:
+                conversation_storage = ConversationReferenceStorage(str(storage_path))
+                # Verificar se a classe real foi importada
+                if hasattr(conversation_storage, 'store_conversation_reference'):
+                    logger.info("✅ ConversationReferenceStorage REAL inicializada em: %s", storage_path)
+                else:
+                    logger.error("❌ ConversationReferenceStorage STUB sendo usada!")
+            except Exception as storage_init_err:
+                logger.error("💥 Erro ao inicializar ConversationReferenceStorage: %s", storage_init_err)
+                conversation_storage = None
         
         # Inicializar BotSender com configuração completa
         bot_sender = BotSender(adapter, APP_ID, conversation_storage)
@@ -372,11 +400,18 @@ def gclick_webhook(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse("Erro interno", status_code=500)
 
 # ─────────────────────────────────────────────────────────────
-# TIMERS
+# TIMERS - Executam em UTC por padrão
+# Para horário de São Paulo, configure no Function App:
+# Linux: WEBSITE_TIME_ZONE=America/Sao_Paulo  
+# Windows: WEBSITE_TIME_ZONE=E. South America Standard Time
 # ─────────────────────────────────────────────────────────────
 @app.function_name(name="MorningNotifications")
 @app.schedule(schedule="0 0 11 * * 1-5", arg_name="timer", run_on_startup=False, use_monitor=True)
 def morning_notifications(timer: func.TimerRequest) -> None:
+    """
+    Timer matutino: 11:00 (UTC) ou 08:00 (BRT) se timezone configurado.
+    Executa scan completo para detectar tarefas vencidas e próximas do vencimento.
+    """
     if not FEATURES["scheduled_notifications"]:
         logger.info("⏭️  Notificações agendadas desabilitadas via feature flag")
         return
@@ -389,6 +424,10 @@ def morning_notifications(timer: func.TimerRequest) -> None:
 @app.function_name(name="AfternoonNotifications")
 @app.schedule(schedule="0 30 20 * * 1-5", arg_name="timer", run_on_startup=False, use_monitor=True)
 def afternoon_notifications(timer: func.TimerRequest) -> None:
+    """
+    Timer vespertino: 20:30 (UTC) ou 17:30 (BRT) se timezone configurado.
+    Executa scan rápido para tarefas com vencimento próximo apenas.
+    """
     if not FEATURES["scheduled_notifications"]:
         logger.info("⏭️  Notificações agendadas desabilitadas via feature flag")
         return
@@ -417,6 +456,7 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
         name = body.get("name")
         from_user = body.get("from", {})
         conversation = body.get("conversation", {})
+        recipient = body.get("recipient", {})  # dados do bot (id/nome)
         
         logger.info("📱 Teams activity: type=%s, name=%s, user=%s", 
                    msg_type, name, from_user.get("name"))
@@ -444,6 +484,10 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                             "name": user_name,
                             "aad_object_id": from_user.get("aadObjectId"),
                             "role": from_user.get("role", "user")
+                        },
+                        "bot": {
+                            "id": recipient.get("id"),
+                            "name": recipient.get("name"),
                         },
                         "conversation": {
                             "id": conversation_id,
@@ -482,6 +526,10 @@ def messages(req: func.HttpRequest) -> func.HttpResponse:
                             "name": user_name,
                             "aad_object_id": from_user.get("aadObjectId"),
                             "role": from_user.get("role", "user")
+                        },
+                        "bot": {
+                            "id": recipient.get("id"),
+                            "name": recipient.get("name"),
                         },
                         "conversation": {
                             "id": f"dev-{user_id}",
@@ -866,8 +914,12 @@ def resilience_metrics(req: func.HttpRequest) -> func.HttpResponse:
     try:
         # Tentar importar o sistema de resilience
         try:
-            from engine.resilience import resilience_manager
-            from engine.cache import IntelligentCache
+            try:
+                from shared_code.engine.resilience import resilience_manager
+                from shared_code.engine.cache import IntelligentCache
+            except ImportError:
+                from engine.resilience import resilience_manager
+                from engine.cache import IntelligentCache
             
             resilience_stats = resilience_manager.get_stats()
             
@@ -1006,11 +1058,24 @@ def capture_teams_id(req: func.HttpRequest) -> func.HttpResponse:
                     all_refs = conversation_storage.list_all_references()
                     logger.info("🔍 Encontradas %d referências", len(all_refs))
                     for user_id, ref_data in all_refs.items():
-                        user_info = ref_data.get("user", {}) if isinstance(ref_data, dict) else {}
+                        user_name = "N/A"
+                        last_activity = "N/A"
+
+                        if isinstance(ref_data, dict):
+                            # v2 (novo): ref_data -> { user_id, conversation_data, stored_at, version }
+                            if ref_data.get("version") == "2.0":
+                                cdata = ref_data.get("conversation_data", {})
+                                user_name = (cdata.get("user") or {}).get("name", "N/A")
+                                last_activity = (cdata.get("last_activity") or {}).get("timestamp", "N/A")
+                            else:
+                                # legado: talvez já seja um dict no formato ConversationReference
+                                user_name = (ref_data.get("user") or {}).get("name", "N/A")
+                                last_activity = ref_data.get("stored_at", "N/A")
+
                         conversation_list.append({
                             "teams_id": user_id,
-                            "user_name": user_info.get("name", "N/A"),
-                            "last_activity": ref_data.get("timestamp", "N/A") if isinstance(ref_data, dict) else "N/A"
+                            "user_name": user_name,
+                            "last_activity": last_activity
                         })
                 else:
                     # Fallback para estruturas internas
@@ -1087,8 +1152,8 @@ def health(req: func.HttpRequest) -> func.HttpResponse:
             "user_mapping": mapping_status,
             "timestamp": datetime.utcnow().isoformat(),
             "functions_detected": {
-                "total": 8,
-                "http_endpoints": 6,
+                "total": 13,
+                "http_endpoints": 11,
                 "timer_triggers": 2,
             },
         }
@@ -1126,3 +1191,74 @@ def run_cycle_now(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logger.error("💥 Erro no ciclo manual: %s", e, exc_info=True)
         return _json({"status": "error", "message": str(e)}, status=500)
+
+# ─────────────────────────────────────────────────────────────
+# HTTP — Debug ConversationReference Storage
+# ─────────────────────────────────────────────────────────────
+@app.function_name(name="DebugConversationStorage")
+@app.route(route="debug/conversation-storage", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+def debug_conversation_storage(req: func.HttpRequest) -> func.HttpResponse:
+    """Debug endpoint para verificar estado do ConversationReference storage"""
+    if not FEATURES["debug_endpoints"]:
+        return _json({"error": "Debug endpoints desabilitados"}, status=403)
+    
+    try:
+        debug_info = {
+            "storage_configured": conversation_storage is not None,
+            "storage_type": str(type(conversation_storage)) if conversation_storage else None,
+            "storage_path": str(conversation_storage.file_path) if conversation_storage else None,
+            "methods_available": {},
+            "references_count": 0,
+            "references_sample": {},
+            "file_exists": False,
+            "file_size": 0,
+            "last_modified": None,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        if conversation_storage:
+            # Verificar métodos disponíveis
+            methods_to_check = ['store_conversation_reference', 'get_conversation_reference', 'save', 'add', 'get', 'list_users']
+            for method in methods_to_check:
+                debug_info["methods_available"][method] = {
+                    "exists": hasattr(conversation_storage, method),
+                    "callable": callable(getattr(conversation_storage, method, None))
+                }
+            
+            # Informações sobre as referências armazenadas
+            debug_info["references_count"] = len(conversation_storage.references)
+            
+            # Sample de dados (primeiros 3 user_ids)
+            sample_users = list(conversation_storage.references.keys())[:3]
+            for user_id in sample_users:
+                ref_data = conversation_storage.references.get(user_id)
+                if isinstance(ref_data, dict) and ref_data.get("version") == "2.0":
+                    cdata = ref_data.get("conversation_data", {})
+                    debug_info["references_sample"][user_id] = {
+                        "has_version": "2.0",
+                        "user_name": (cdata.get("user") or {}).get("name"),
+                        "bot_id": (cdata.get("bot") or {}).get("id"),
+                        "conversation_id": (cdata.get("conversation") or {}).get("id"),
+                        "service_url": cdata.get("service_url"),
+                        "stored_at": ref_data.get("stored_at"),
+                    }
+                else:
+                    debug_info["references_sample"][user_id] = {
+                        "type": str(type(ref_data)),
+                        "stored_at": (ref_data or {}).get("stored_at") if isinstance(ref_data, dict) else None
+                    }
+            
+            # Informações sobre o arquivo
+            if conversation_storage.file_path:
+                file_path = Path(conversation_storage.file_path)
+                debug_info["file_exists"] = file_path.exists()
+                if file_path.exists():
+                    stat = file_path.stat()
+                    debug_info["file_size"] = stat.st_size
+                    debug_info["last_modified"] = datetime.fromtimestamp(stat.st_mtime).isoformat()
+        
+        return _json(debug_info)
+        
+    except Exception as e:
+        logger.error("💥 Erro no debug do conversation storage: %s", e, exc_info=True)
+        return _json({"error": str(e), "timestamp": datetime.utcnow().isoformat()}, status=500)
