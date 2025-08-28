@@ -19,8 +19,12 @@ aiohttp>=3.8.1
 # Logging e utilitários
 python-json-logger>=2.0.0
 
-# NOVO: Para relatórios Excel e timezone
-pandas>=2.2
-openpyxl>=3.1
+# Werkzeug para compatibilidade (removido para reduzir memory footprint)
+# werkzeug~=3.1.3
+
+# NOVO: Para timezone (OBRIGATÓRIO para zoneinfo no Linux)
+tzdata>=2023.3
+# Relatórios Excel (comentado para reduzir memory footprint)
+# pandas>=2.2
+# openpyxl>=3.1
 backports.zoneinfo>=0.2.1; python_version<"3.9"
-tzdata>=2024.1

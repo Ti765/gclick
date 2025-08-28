@@ -75,6 +75,13 @@ except Exception:
 # ─────────────────────────────────────────────────────────────
 # IMPORTS DO PROJETO - SEMPRE VIA shared_code (elimina ambiguidade)
 # ─────────────────────────────────────────────────────────────
+# Variáveis para armazenar imports e flags de estado
+mapear_apelido_para_teams_id = None
+BotSender = None
+ConversationReferenceStorage = None
+run_notification_cycle = None
+import_style = "failed"
+
 try:
     # ✅ SEMPRE usar shared_code.* para evitar colisão com pacote 'teams' do PyPI
     from shared_code.teams.user_mapping import mapear_apelido_para_teams_id
@@ -89,9 +96,50 @@ try:
     logger.info("✅ Imports shared_code OK - ConversationReferenceStorage REAL carregada")
     
 except Exception as imp_err:
-    logger.critical("❌ FALHA CRÍTICA nos imports: %s", imp_err, exc_info=True)
-    # ❌ NÃO usar stubs - falhar rapidamente é melhor que estado inconsistente
-    raise SystemExit(f"Deploy inválido - imports falharam: {imp_err}")
+    logger.error("❌ Falha nos imports shared_code: %s", imp_err, exc_info=True)
+    
+    # Tentar fallback para imports diretos (compatibilidade)
+    try:
+        import sys
+        from pathlib import Path
+        
+        # Adicionar diretório raiz ao path se ainda não estiver
+        root_dir = Path(__file__).parent.parent
+        if str(root_dir) not in sys.path:
+            sys.path.insert(0, str(root_dir))
+            
+        from teams.user_mapping import mapear_apelido_para_teams_id
+        from teams.bot_sender import BotSender, ConversationReferenceStorage
+        from engine.notification_engine import run_notification_cycle
+        
+        import_style = "direct"
+        logger.warning("⚠️ Usando imports diretos como fallback")
+        
+    except Exception as fallback_err:
+        logger.error("❌ Fallback imports também falharam: %s", fallback_err, exc_info=True)
+        
+        # Modo degradado - criar stubs para evitar crash
+        logger.warning("⚠️ Executando em modo degradado - funcionalidades limitadas")
+        import_style = "degraded"
+        
+        # Stubs mínimos para evitar NameError
+        def mapear_apelido_para_teams_id(apelido):
+            logger.warning("Stub: mapear_apelido_para_teams_id chamado com %s", apelido)
+            return None
+            
+        class ConversationReferenceStorage:
+            def __init__(self, *args, **kwargs):
+                pass
+            def store_conversation_reference(self, *args, **kwargs):
+                logger.warning("Stub: store_conversation_reference chamado")
+                
+        class BotSender:
+            def __init__(self, *args, **kwargs):
+                pass
+                
+        def run_notification_cycle(*args, **kwargs):
+            logger.warning("Stub: run_notification_cycle chamado")
+            return {"status": "degraded", "message": "Imports não disponíveis"}
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG AZURE FUNCTIONS APP
@@ -151,7 +199,7 @@ bot_sender = None
 conversation_storage = None
 
 # Configurar Bot Framework apenas se feature habilitada e credenciais disponíveis
-if FEATURES["teams_bot"] and APP_ID and APP_PASSWORD:
+if FEATURES["teams_bot"] and APP_ID and APP_PASSWORD and import_style != "degraded":
     try:
         from botbuilder.core import BotFrameworkAdapter, BotFrameworkAdapterSettings  # type: ignore
 
@@ -225,6 +273,8 @@ if FEATURES["teams_bot"] and APP_ID and APP_PASSWORD:
         logger.info("🤖  BotSender configurado – storage em %s", storage_path if FEATURES["conversation_storage"] else "desabilitado")
     except Exception as bot_err:
         logger.warning("⚠️  Bot Framework não configurado: %s", bot_err, exc_info=True)
+elif import_style == "degraded":
+    logger.warning("🤖  Bot Teams não configurado - modo degradado (imports falharam)")
 elif not FEATURES["teams_bot"]:
     logger.info("🤖  Bot Teams desabilitado via feature flag")
 elif not (APP_ID and APP_PASSWORD):
@@ -244,6 +294,10 @@ def _run_cycle(period: str, dias_proximos: int, full_scan: bool):
     if not FEATURES["notification_engine"]:
         logger.info("⏭️  Notification engine desabilitado via feature flag")
         return {"status": "disabled", "period": period}
+    
+    if import_style == "degraded":
+        logger.warning("⏭️  Notification engine não disponível - modo degradado")
+        return {"status": "degraded", "period": period, "message": "Imports falharam"}
         
     # Modo produção por padrão - apenas dry_run se explicitamente configurado
     exec_mode = "dry_run" if os.getenv("SIMULACAO", "false").lower() == "true" else "live"
