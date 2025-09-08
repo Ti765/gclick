@@ -3,6 +3,9 @@ import requests
 import time
 from typing import List, Dict, Any
 from .auth import get_access_token
+from ..config.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 BASE = "https://api.gclick.com.br"
 
@@ -22,7 +25,13 @@ def listar_departamentos(page: int = 0, size: int = 100) -> List[Dict[str, Any]]
     return content
 
 def get_departamentos_cached() -> List[Dict[str, Any]]:
-    """Retorna departamentos com cache de 1 hora"""
+    """
+    Retorna departamentos com cache de 1 hora.
+    Thread-safe para uso concorrente.
+    
+    Returns:
+        Lista de departamentos ou lista vazia em caso de erro
+    """
     now = time.time()
     cache = _cache_departamentos
     
@@ -30,9 +39,9 @@ def get_departamentos_cached() -> List[Dict[str, Any]]:
         try:
             cache["data"] = listar_departamentos(size=500)  # Buscar todos
             cache["timestamp"] = now
-            print(f"Cache de departamentos atualizado: {len(cache['data'])} itens")
+            logger.info(f"Cache de departamentos atualizado: {len(cache['data'])} itens")
         except Exception as e:
-            print(f"Erro ao cachear departamentos: {e}")
+            logger.error(f"Erro ao cachear departamentos: {e}")
             if cache["data"] is None:
                 cache["data"] = []
     

@@ -2,6 +2,9 @@ from __future__ import annotations
 import json, csv, glob, argparse, datetime as dt
 from pathlib import Path
 from typing import Iterable, Dict, Any
+from ..config.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 METRICS_GLOB = "storage/metrics/notification_cycle_*.jsonl"
 AGG_JSON = Path("storage/metrics/metrics_aggregate.json")
@@ -10,10 +13,10 @@ CSV_OUT = Path("reports/exports/metrics_daily.csv")
 def iter_metric_lines(debug=False) -> Iterable[dict]:
     files = sorted(glob.glob(METRICS_GLOB))
     if debug:
-        print(f"[DEBUG] Encontrados {len(files)} arquivos de métricas.")
+        logger.debug(f"Encontrados {len(files)} arquivos de métricas.")
     for fname in files:
         if debug:
-            print(f"[DEBUG] Lendo {fname}")
+            logger.debug(f"Lendo {fname}")
         with open(fname, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f, 1):
                 l = line.strip()
@@ -22,11 +25,11 @@ def iter_metric_lines(debug=False) -> Iterable[dict]:
                 try:
                     data = json.loads(l)
                     if debug:
-                        print(f"[DEBUG] {fname} linha {i} run_id={data.get('run_id')}")
+                        logger.debug(f"{fname} linha {i} run_id={data.get('run_id')}")
                     yield data
                 except json.JSONDecodeError:
                     if debug:
-                        print(f"[WARN] Linha inválida ignorada em {fname}:{i}")
+                        logger.warning(f"Linha inválida ignorada em {fname}:{i}")
                     continue
 
 def aggregate(lines: Iterable[dict], debug=False) -> Dict[str, dict]:
@@ -34,13 +37,13 @@ def aggregate(lines: Iterable[dict], debug=False) -> Dict[str, dict]:
     for ev in lines:
         if ev.get("schema_version") != 1:
             if debug:
-                print(f"[DEBUG] Ignorando schema_version={ev.get('schema_version')}")
+                logger.debug(f"Ignorando schema_version={ev.get('schema_version')}")
             continue
         date_key = ev.get("cycle_date")
         stats = ev.get("stats") or {}
         if not date_key or not stats:
             if debug:
-                print("[DEBUG] Evento sem cycle_date ou stats – ignorado")
+                logger.debug("Evento sem cycle_date ou stats – ignorado")
             continue
         rec = daily.setdefault(date_key, {
             "open_total": 0,
@@ -59,7 +62,7 @@ def aggregate(lines: Iterable[dict], debug=False) -> Dict[str, dict]:
         if rid:
             rec["run_ids"].append(rid)
         if debug:
-            print(f"[DEBUG] Agregado {date_key}: runs={rec['runs']} open_total={rec['open_total']}")
+            logger.debug(f"Agregado {date_key}: runs={rec['runs']} open_total={rec['open_total']}")
 
     dates_sorted = sorted(daily.keys())
     for i, dk in enumerate(dates_sorted):
@@ -103,7 +106,7 @@ def main():
         daily = {k: v for k, v in daily.items() if k >= args.since}
     write_outputs(daily)
     if args.debug:
-        print(f"[DEBUG] Dias agregados: {list(daily.keys())}")
+        logger.debug(f"Dias agregados: {list(daily.keys())}")
 
 if __name__ == '__main__':
     main()
