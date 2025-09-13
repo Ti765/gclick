@@ -290,6 +290,24 @@ def _json(payload: dict, status: int = 200) -> func.HttpResponse:
         headers={"Content-Type": "application/json"},
     )
 
+def run_async(coro):
+    """
+    Executa uma coroutine de forma segura em qualquer thread do Azure Functions.
+    - Se houver event loop rodando nesta thread: agenda a tarefa e retorna True.
+    - Se não houver: cria um loop, executa a coroutine e retorna o resultado.
+    """
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    if loop.is_running():
+        asyncio.create_task(coro)
+        return True
+    else:
+        return loop.run_until_complete(coro)
+
 def _run_cycle(period: str, dias_proximos: int, full_scan: bool):
     if not FEATURES["notification_engine"]:
         logger.info("⏭️  Notification engine desabilitado via feature flag")
@@ -385,22 +403,8 @@ def gclick_webhook(req: func.HttpRequest) -> func.HttpResponse:
                                       f"👤 **Responsável:** {apelido}\n"
                                       f"🕐 **Timestamp:** {datetime.utcnow().strftime('%d/%m/%Y %H:%M')}")
                         
-                        # Enviar mensagem usando bot_sender
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        
-                        if loop.is_running():
-                            # Se já está em um loop, usar ensure_future
-                            future = asyncio.ensure_future(
-                                bot_sender.send_message(teams_id, mensagem)
-                            )
-                            # Para Azure Functions, vamos aguardar um tempo mínimo
-                            sent_success = True  # Assumir sucesso por agora
-                        else:
-                            # Executar de forma síncrona
-                            sent_success = loop.run_until_complete(
-                                bot_sender.send_message(teams_id, mensagem)
-                            )
+                        # Enviar mensagem usando bot_sender de forma segura em qualquer thread
+                        sent_success = run_async(bot_sender.send_message(teams_id, mensagem))
                         
                         if sent_success:
                             enviados += 1
@@ -759,12 +763,7 @@ def _process_card_action(body: dict) -> func.HttpResponse:
         # Enviar confirmação para o usuário (se tivermos referência de conversa)
         if bot_sender and user_id and confirmation_text:
             try:
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(bot_sender.send_message(user_id, confirmation_text))
-                else:
-                    loop.run_until_complete(bot_sender.send_message(user_id, confirmation_text))
+                run_async(bot_sender.send_message(user_id, confirmation_text))
                 logger.info("Confirmação enviada para %s (%s)", user_name, user_id)
             except Exception as e:
                 logger.error("Falha ao enviar confirmação para %s: %s", user_id, e)
