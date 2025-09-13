@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import asyncio
-from typing import Optional
+from typing import Optional, Union
 from pathlib import Path
 from datetime import datetime
 
@@ -48,7 +48,7 @@ class BotSender:
         else:
             self.logger.warning("⚠️ ConversationReferenceStorage não fornecido - funcionalidade limitada")
     
-    async def send_message(self, user_id: str, message: str, card_json: Optional[str] = None) -> bool:
+    async def send_message(self, user_id: str, message: str, card_json: Optional[Union[str, dict]] = None) -> bool:
         """
         Envia mensagem proativa para um usuário específico.
         
@@ -88,30 +88,30 @@ class BotSender:
             # Define callback que será executado no contexto da conversa
             async def _send_callback(turn_context: TurnContext):
                 if card_json:
-                    # Envio como cartão adaptativo
+                    # Envio como cartão adaptativo (tolerante a str ou dict)
                     try:
-                        card_data = json.loads(card_json)
+                        if isinstance(card_json, str):
+                            card_data = json.loads(card_json)
+                        elif isinstance(card_json, dict):
+                            card_data = card_json
+                        else:
+                            raise TypeError("card_json must be str or dict")
+
                         card_attachment = Attachment(
                             content_type="application/vnd.microsoft.card.adaptive",
                             content=card_data
                         )
                         activity = Activity(
                             type="message",
-                            text=message,  # Texto de fallback caso o card não renderize
+                            text=message,  # fallback
                             attachments=[card_attachment]
                         )
                         await turn_context.send_activity(activity)
                         self.logger.info(f"Cartão adaptativo enviado para {user_id}")
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Erro ao parsear JSON do cartão: {e}")
-                        # Fallback para mensagem de texto
-                        await turn_context.send_activity(message)
                     except Exception as e:
                         self.logger.error(f"Erro ao enviar cartão: {e}")
-                        # Fallback para mensagem de texto
-                        await turn_context.send_activity(message)
+                        await turn_context.send_activity(message)  # fallback de texto
                 else:
-                    # Envio como mensagem texto simples
                     await turn_context.send_activity(message)
                 
             # Continua a conversa usando a referência armazenada
@@ -144,12 +144,16 @@ class BotSender:
                 self.logger.warning("send_direct_message: from.id ausente no payload")
                 return
             
-            import asyncio
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self.send_message(user_id, text))
-            else:
-                loop.run_until_complete(self.send_message(user_id, text))
+            # Enviar de forma segura em qualquer thread
+            try:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.send_message(user_id, text))
+                except RuntimeError:
+                    asyncio.run(self.send_message(user_id, text))
+            except Exception as e:
+                self.logger.error(f"send_direct_message falhou: {e}", exc_info=True)
         except Exception as e:
             self.logger.error(f"send_direct_message falhou: {e}", exc_info=True)
 

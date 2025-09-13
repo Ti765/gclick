@@ -4,8 +4,11 @@ import json
 import logging
 from datetime import date, timedelta
 from collections import defaultdict
-from typing import Dict, List, Any, Tuple, Optional
-import datetime as dt
+from typing import Dict, List, Any, Tuple, Optional, Union
+from typing import Dict as TDict
+
+# Tipo para mensagens enviadas: categorias -> list of (tarefa_dict, chave)
+MensagensBucket = TDict[str, List[Tuple[Dict[str, Any], str]]]
 
 import yaml
 
@@ -13,7 +16,7 @@ from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
 from gclick.responsaveis import listar_responsaveis_tarefa
 from teams.webhook import enviar_teams_mensagem
 from teams.cards import create_task_notification_card
-from storage.state import already_sent, register_sent, purge_older_than
+from storage.state import purge_older_than
 # NOVA API: Idempotência granular
 from storage.state import (
     get_global_state_storage, 
@@ -81,11 +84,10 @@ def _cached_listar_tarefas_page(categoria: str, page: int, size: int,
         raise
 
 @resilient(service="teams_bot", check_rate_limit=False)  # Rate limit separado do main cycle
-async def _resilient_send_card(bot_sender, teams_id: str, card_payload: dict, fallback_text: str):
-    """Wrapper com resilience para envio de cards."""
+async def _resilient_send_card(bot_sender, teams_id: str, card_payload: Union[str, dict], fallback_text: str):
+    """Wrapper com resilience para envio de cards (aceita str ou dict)."""
     if not HAS_RESILIENCE:
         return await bot_sender.send_card(teams_id, card_payload, fallback_text)
-    
     try:
         result = await bot_sender.send_card(teams_id, card_payload, fallback_text)
         logger.debug("📤 Card enviado com sucesso para %s", teams_id)
@@ -103,6 +105,19 @@ def _ensure_card_payload(card) -> dict:
             logging.warning("[CARD] Payload veio como string não-JSON; usando fallback.")
             return {"type": "AdaptiveCard", "version": "1.3"}  # fallback mínimo
     return card
+
+
+# Helper para executar corrotinas com segurança em qualquer thread
+def _run_coro_safely(coro):
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        # já existe loop nesta thread → agenda e segue
+        loop.create_task(coro)
+        return True
+    except RuntimeError:
+        # não há loop nesta thread → executa até terminar
+        return asyncio.run(coro)
 
 
 def _has_conversation(storage, user_id: str) -> bool:
@@ -610,8 +625,7 @@ def run_notification_cycle(
 
     # 6. NOVA IDEMPOTÊNCIA: Filtro granular por tarefa/responsável/dia
     state_storage = get_global_state_storage()
-    mensagens_enviadas: List[Tuple[str, str, str]] = []
-    envios_para_marcar: List[Tuple[str, bool]] = []
+    mensagens_enviadas: List[Tuple[str, str, MensagensBucket]] = []
     
     for apelido, bkt in responsaveis_ordenados:
         total_resp = sum(len(lst) for lst in bkt.values())
@@ -649,7 +663,7 @@ def run_notification_cycle(
         print(f"[INFO] DRY-RUN run_id={run_id} – Mensagens preparadas:")
         if resumo_global_msg:
             print("----\n[RESUMO GLOBAL]\n" + resumo_global_msg)
-        for apelido, key, msg in mensagens_enviadas:
+        for apelido, msg, _bkt in mensagens_enviadas:
             print("----")
             print(f"[{apelido}]\n{msg}")
         print(f"[INFO] DRY-RUN concluído. (responsáveis selecionados={len(mensagens_enviadas)})")
@@ -683,35 +697,35 @@ def run_notification_cycle(
                                     try:
                                         # Dados do responsável para o card
                                         responsavel_dados = {"nome": apelido, "apelido": apelido}
-                                        
-                                        # Criar card da tarefa
-                                        card_json_str = create_task_notification_card(tarefa, responsavel_dados)
-                                        card_payload = _ensure_card_payload(card_json_str)
-                                        
+
+                                        # Criar card da tarefa e garantir payload válido
+                                        card_json_raw = create_task_notification_card(tarefa, responsavel_dados)
+                                        card_payload = _ensure_card_payload(card_json_raw)
+
                                         # Texto de fallback
                                         fallback_text = (
                                             f"🔔 Obrigação: {tarefa.get('nome', 'Sem nome')} "
                                             f"(Venc: {tarefa.get('dataVencimento', 'N/A')})"
                                         )
-                                        
-                                        # Enviar card de forma assíncrona com resilience
-                                        import asyncio
-                                        loop = asyncio.get_event_loop()
-                                        if loop.is_running():
-                                            asyncio.ensure_future(_resilient_send_card(bot_sender, teams_id, card_payload, fallback_text))
-                                        else:
-                                            loop.run_until_complete(_resilient_send_card(bot_sender, teams_id, card_payload, fallback_text))
-                                        
-                                        # Marcar como enviado com sucesso
+
+                                        # Executa a corrotina de forma segura em qualquer thread
+                                        _run_coro_safely(_resilient_send_card(bot_sender, teams_id, card_payload, fallback_text))
+
                                         envios_realizados_responsavel.append((chave, True))
                                         logging.info(f"[BOT-CARD] ✅ Enviado para {apelido} (tarefa: {tarefa.get('id')})")
-                                        
+
                                     except Exception as card_error:
                                         envios_realizados_responsavel.append((chave, False))
                                         logging.warning(f"[BOT-CARD] ❌ Falha para {apelido} tarefa {tarefa.get('id')}: {card_error}")
                             
-                            mensagem_enviada = True
-                            logging.info(f"[BOT] ✅ Cards enviados para {apelido} (teams_id: {teams_id})")
+                            # Mensagem enviada se pelo menos 1 card executou a corrotina com sucesso
+                            mensagem_enviada = any(sucesso for _, sucesso in envios_realizados_responsavel)
+                            sucessos = sum(1 for _, sucesso in envios_realizados_responsavel if sucesso)
+                            total = len(envios_realizados_responsavel)
+                            if sucessos > 0:
+                                logging.info(f"[BOT] ✅ {sucessos}/{total} cards enviados para {apelido} (teams_id: {teams_id})")
+                            else:
+                                logging.warning(f"[BOT] ❌ Nenhum card saiu para {apelido} (tudo falhou via bot)")
                         except Exception as bot_error:
                             logging.warning(f"[BOT] ❌ Falha geral para {apelido}: {bot_error}")
                 
@@ -731,8 +745,6 @@ def run_notification_cycle(
                             for tarefa, chave in lista_tarefas_chaves:
                                 envios_realizados_responsavel.append((chave, False))
                 
-                # NOVA LÓGICA: Marcar como enviado apenas os sucessos
-                marcar_envios_bem_sucedidos(envios_realizados_responsavel, state_storage)
                 
                 if verbose:
                     sucessos = sum(1 for _, sucesso in envios_realizados_responsavel if sucesso)
@@ -743,19 +755,19 @@ def run_notification_cycle(
                     time.sleep(rate_limit_sleep_ms / 1000.0)
                     
             except Exception as e:
-                print(f"[ERRO_ENVIO] {apelido}: {e}")
                 logging.error(f"[ERRO_ENVIO] {apelido}: {e}")
                 # Em caso de erro geral, marcar todas como falha
-                for categoria_urgencia, lista_tarefas_chaves in bkt_filtrado.items():
-                    for tarefa, chave in lista_tarefas_chaves:
+                for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                    for _tarefa, chave in lista_tarefas_chaves:
                         envios_realizados_responsavel.append((chave, False))
-                if verbose:
-                    print(f"[ENVIADO] {apelido} ({key})")
                 if rate_limit_sleep_ms > 0:
                     time.sleep(rate_limit_sleep_ms / 1000.0)
-            except Exception as e:
-                print(f"[ERRO_ENVIO] {apelido}: {e}")
-                logging.error(f"[ERRO_ENVIO] {apelido}: {e}")
+            finally:
+                # Marca somente os sucessos, mesmo se ocorreu alguma exceção no caminho
+                try:
+                    marcar_envios_bem_sucedidos(envios_realizados_responsavel, state_storage)
+                except Exception as e2:
+                    logging.error("Falha ao marcar idempotência: %s", e2)
 
     # 8. Estatísticas finais
     counts_final = {

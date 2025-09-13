@@ -1,0 +1,34 @@
+{
+  "29:1_bBOmGGcdKPTxOjRFSnxs4UURvnDYGtU2fFdDQV9pBjk0sTfMU45dKw2HCeUtmTEJZJawAO3ule-N4psU-_rWQ": {
+    "user_id": "29:1_bBOmGGcdKPTxOjRFSnxs4UURvnDYGtU2fFdDQV9pBjk0sTfMU45dKw2HCeUtmTEJZJawAO3ule-N4psU-_rWQ",
+    "conversation_data": {
+      "user": {
+        "id": "29:1_bBOmGGcdKPTxOjRFSnxs4UURvnDYGtU2fFdDQV9pBjk0sTfMU45dKw2HCeUtmTEJZJawAO3ule-N4psU-_rWQ",
+        "name": "Maurício Bernejo",
+        "aad_object_id": "4a5a678b-f3c1-4a7d-af41-1b97686a0b6b",
+        "role": "user"
+      },
+      "bot": {
+        "id": "28:e295b962-c66a-44f0-8008-763d8f2a1a56",
+        "name": "gclick-teams-bot"
+      },
+      "conversation": {
+        "id": "a:1HdV9PQO6SpUZBmqIxDLK50bYritKO7CS4uXNIx0it4wHjFKQbJ8i-o_cLf7RsEo1GZu3FMNg-QKGKwL3_2MpECDMfrexeYLWpu5mrmxdF_s_8ECcNG0bRV8itDiG3_8d",
+        "name": null,
+        "conversation_type": "personal",
+        "tenant_id": "24f64a57-04b9-4099-b493-b15cb6c1f281"
+      },
+      "channel_id": "msteams",
+      "service_url": "https://smba.trafficmanager.net/amer/24f64a57-04b9-4099-b493-b15cb6c1f281/",
+      "locale": "pt-BR",
+      "timezone": "America/Sao_Paulo",
+      "last_activity": {
+        "type": "message",
+        "timestamp": "2025-09-12T20:25:40.537261",
+        "id": "f:a5d6622d-dbd4-3436-aa12-e79496380ce8"
+      }
+    },
+    "stored_at": "2025-09-12T20:25:40.537261",
+    "version": "2.0"
+  }
+}
