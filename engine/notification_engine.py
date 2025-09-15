@@ -10,6 +10,7 @@ import datetime as dt
 import yaml
 
 from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
+from gclick.tarefas_detalhes import obter_tarefa_detalhes, resumir_detalhes_para_card
 from gclick.responsaveis import listar_responsaveis_tarefa
 from teams.webhook import enviar_teams_mensagem
 from teams.cards import create_task_notification_card
@@ -79,6 +80,30 @@ def _cached_listar_tarefas_page(categoria: str, page: int, size: int,
     except Exception as e:
         logger.warning("❌ Falha ao buscar tarefas (page=%d, size=%d): %s", page, size, e)
         raise
+
+
+def _cached_obter_detalhes(task_id: str, *, ttl: int = 600) -> Dict[str, Any]:
+    """
+    Busca detalhes da tarefa com cache (10 min por padrão).
+    Retorna um resumo já normalizado para o card.
+    """
+    if not HAS_RESILIENCE or not notification_cache:
+        raw = obter_tarefa_detalhes(task_id)
+        return resumir_detalhes_para_card(raw)
+
+    cache_key = f"detalhes:{task_id}"
+    cached = notification_cache.get(cache_key)
+    if cached is not None:
+        logger.debug("🎯 Cache HIT detalhes %s", task_id)
+        return cached
+
+    raw = obter_tarefa_detalhes(task_id)
+    resumo = resumir_detalhes_para_card(raw)
+    try:
+        notification_cache.set(cache_key, resumo, ttl=ttl)
+    except Exception:
+        logger.debug("Falha ao setar cache detalhes %s", task_id, exc_info=True)
+    return resumo
 
 @resilient(service="teams_bot", check_rate_limit=False)  # Rate limit separado do main cycle
 async def _resilient_send_card(bot_sender, teams_id: str, card_payload: dict, fallback_text: str):
@@ -684,8 +709,17 @@ def run_notification_cycle(
                                         # Dados do responsável para o card
                                         responsavel_dados = {"nome": apelido, "apelido": apelido}
                                         
-                                        # Criar card da tarefa
-                                        card_json_str = create_task_notification_card(tarefa, responsavel_dados)
+                                        # Pré-carregar detalhes compactos (cache) e criar card
+                                        task_id_txt = str(tarefa.get("id") or tarefa.get("taskId") or "")
+                                        detalhes_compactos = {}
+                                        try:
+                                            detalhes_compactos = _cached_obter_detalhes(task_id_txt)
+                                        except Exception as e_det:
+                                            logging.warning("[DETALHES] Falha ao obter detalhes %s: %s", task_id_txt, e_det)
+                                            detalhes_compactos = {}
+
+                                        # Criar card da tarefa (passando detalhes compactos)
+                                        card_json_str = create_task_notification_card(tarefa, responsavel_dados, detalhes=detalhes_compactos)
                                         card_payload = _ensure_card_payload(card_json_str)
                                         
                                         # Texto de fallback
