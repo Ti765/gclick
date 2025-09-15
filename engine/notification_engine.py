@@ -712,10 +712,21 @@ def run_notification_cycle(
                                         # Pré-carregar detalhes compactos (cache) e criar card
                                         task_id_txt = str(tarefa.get("id") or tarefa.get("taskId") or "")
                                         detalhes_compactos = {}
-                                        try:
-                                            detalhes_compactos = _cached_obter_detalhes(task_id_txt)
-                                        except Exception as e_det:
-                                            logging.warning("[DETALHES] Falha ao obter detalhes %s: %s", task_id_txt, e_det)
+                                        # Limitar número de fetches reais por execução para evitar rate limits
+                                        max_detalhes_per_run = int(os.getenv('MAX_DETALHES_FETCH_PER_RUN', '50'))
+                                        # contador no cache global opcional
+                                        if not hasattr(run_notification_cycle, '_detalhes_fetches_done'):
+                                            setattr(run_notification_cycle, '_detalhes_fetches_done', 0)
+                                        done = getattr(run_notification_cycle, '_detalhes_fetches_done')
+                                        if done < max_detalhes_per_run:
+                                            try:
+                                                detalhes_compactos = _cached_obter_detalhes(task_id_txt)
+                                                setattr(run_notification_cycle, '_detalhes_fetches_done', done + 1)
+                                            except Exception as e_det:
+                                                logging.warning("[DETALHES] Falha ao obter detalhes %s: %s", task_id_txt, e_det)
+                                                detalhes_compactos = {}
+                                        else:
+                                            logging.debug("[DETALHES] Limite de fetch por run atingido (%s). Pulando fetch para %s", max_detalhes_per_run, task_id_txt)
                                             detalhes_compactos = {}
 
                                         # Criar card da tarefa (passando detalhes compactos)

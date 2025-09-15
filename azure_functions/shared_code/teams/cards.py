@@ -120,30 +120,9 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
                 "url": url_tarefa
             },
             {
-                "type": "Action.ShowCard",
+                "type": "Action.ToggleVisibility",
                 "title": "📝 Detalhes",
-                "card": {
-                    "type": "AdaptiveCard",
-                    "version": "1.3",
-                    "body": [
-                        {
-                            "type": "TextBlock",
-                            "text": f"**{nome_tarefa}**",
-                            "wrap": True,
-                            "weight": "Bolder"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"Esta obrigação fiscal está sob sua responsabilidade e requer atenção.",
-                            "wrap": True
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"**Próximos passos:**\n- Acesse o G-Click para verificar detalhes\n- Verifique documentos necessários\n- Execute as ações pendentes",
-                            "wrap": True
-                        }
-                    ]
-                }
+                "targetElements": ["detalhes_container"]
             },
             {
                 "type": "Action.Submit",
@@ -157,6 +136,13 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
         ]
     }
     
+    # adicionar container oculto com id 'detalhes_container' contendo instruções iniciais
+    detalhes_items = [
+        {"type": "TextBlock", "text": f"**{nome_tarefa}**", "wrap": True, "weight": "Bolder"},
+        {"type": "TextBlock", "text": "Esta obrigação fiscal está sob sua responsabilidade e requer atenção.", "wrap": True},
+        {"type": "TextBlock", "text": "**Próximos passos:**\n- Acesse o G-Click para verificar detalhes\n- Verifique documentos necessários\n- Execute as ações pendentes", "wrap": True},
+    ]
+    card.get("body", []).append({"type": "Container", "id": "detalhes_container", "isVisible": False, "items": detalhes_items})
     return card
 
 

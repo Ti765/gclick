@@ -13,6 +13,7 @@ if os.path.isdir(SHARED) and SHARED not in sys.path:
 import importlib.util
 
 # Carregar módulo gclick.tarefas_detalhes diretamente
+os.environ.setdefault('GCLICK_API_BASE', 'https://appp.gclick.com.br/api/v1')
 spec = importlib.util.spec_from_file_location("gclick.tarefas_detalhes", os.path.join(ROOT, "gclick", "tarefas_detalhes.py"))
 mod_td = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod_td)
