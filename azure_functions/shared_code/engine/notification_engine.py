@@ -16,7 +16,8 @@ import re
 from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
 from gclick.responsaveis import listar_responsaveis_tarefa
 from teams.webhook import enviar_teams_mensagem
-from teams.cards import create_task_notification_card
+# IMPORT DO CARD MOVIDO PARA MODO LATE-IMPORT para evitar ciclo de import
+from utils.gclick_links import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
 from storage.state import purge_older_than
 # NOVA API: Idempotência granular
 from storage.state import (
@@ -26,35 +27,6 @@ from storage.state import (
     criar_chave_idempotencia
 )
 
-# Helper: montar deep-link para abrir obrigação no G-Click
-EMPRESA_ID_PADRAO = int(os.getenv("GCLICK_EMPRESA_ID", "2557"))
-
-def montar_link_gclick_obrigacao(id_tarefa: Union[str, int], emp_id: int = EMPRESA_ID_PADRAO) -> str:
-    """
-    Constrói o deep-link oficial do G-Click para abrir a obrigação.
-    Aceita id no formato "4.65979" (preferencial), "4-65979", "465979" etc.
-    Regras:
-      - coid  = primeiro grupo numérico (antes do separador)
-      - eveId = segundo grupo numérico (depois do separador) 
-                (fallback: se não houver separador, usa tudo após o 1º dígito)
-    """
-    s = str(id_tarefa or "").strip()
-    # tenta capturar "NNN<sep>NNNNN" com qualquer separador não numérico
-    m = re.match(r"^\s*(\d+)\D+(\d+)\s*$", s)
-    if m:
-        coid, eve = m.group(1), m.group(2)
-    else:
-        # fallback tolerante (ex.: "465979"): 1º dígito vira coid, o resto vira eveId
-        digits = re.findall(r"\d+", s)
-        if not digits:
-            # último recurso: mostra lista
-            return "https://app.gclick.com.br/coListar.do?obj=coevento"
-        flat = "".join(digits)
-        if len(flat) >= 2:
-            coid, eve = flat[0], flat[1:]
-        else:
-            coid, eve = flat or "4", flat or "0"
-    return f"https://app.gclick.com.br/coListar.do?obj=coevento&coid={coid}&eveId={eve}&empId={emp_id}"
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -728,6 +700,9 @@ def run_notification_cycle(
                                     try:
                                         # Dados do responsável para o card
                                         responsavel_dados = {"nome": apelido, "apelido": apelido}
+
+                                        # Import tardio para evitar ciclo de import
+                                        from teams.cards import create_task_notification_card
 
                                         # Criar card da tarefa e garantir payload válido
                                         card_json_raw = create_task_notification_card(tarefa, responsavel_dados)

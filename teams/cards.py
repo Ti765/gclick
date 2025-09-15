@@ -9,10 +9,10 @@ import json
 from typing import Dict, Any, Optional
 from datetime import datetime, date
 
-from engine.notification_engine import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
+from utils.gclick_links import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
 
 
-def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str, Any]) -> Dict[str, Any]:
+def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str, Any], detalhes: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Cria um Adaptive Card para notificação de tarefa/obrigação fiscal.
     
@@ -124,24 +124,7 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
                 "card": {
                     "type": "AdaptiveCard",
                     "version": "1.3",
-                    "body": [
-                        {
-                            "type": "TextBlock",
-                            "text": f"**{nome_tarefa}**",
-                            "wrap": True,
-                            "weight": "Bolder"
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"Esta obrigação fiscal está sob sua responsabilidade e requer atenção.",
-                            "wrap": True
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": f"**Próximos passos:**\n- Acesse o G-Click para verificar detalhes\n- Verifique documentos necessários\n- Execute as ações pendentes",
-                            "wrap": True
-                        }
-                    ]
+                    "body": []
                 }
             },
             {
@@ -155,6 +138,58 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
             # botão 'Dispensar' removido por ausência de API pública suportada
         ]
     }
+
+    # Preencher o corpo do card de detalhes dinamicamente (ShowCard criado acima)
+    try:
+        detalhes_card_body = []
+        if detalhes and isinstance(detalhes, dict) and any(detalhes.values()):
+            detalhes_card_body.append({
+                "type": "TextBlock",
+                "text": f"**{nome_tarefa}**",
+                "wrap": True,
+                "weight": "Bolder"
+            })
+
+            # atividades compactas
+            atividades = detalhes.get("atividades_compactas") or []
+            if atividades:
+                detalhes_card_body.append({
+                    "type": "TextBlock",
+                    "text": "**Atividades:**",
+                    "wrap": True,
+                    "weight": "Bolder"
+                })
+                for linha in atividades:
+                    detalhes_card_body.append({"type": "TextBlock", "text": linha, "wrap": True, "spacing": "None"})
+
+            # meta interna
+            meta = detalhes.get("meta_interna")
+            if meta:
+                detalhes_card_body.append({"type": "TextBlock", "text": f"Meta interna: {meta}", "wrap": True})
+
+            # observações
+            obs = detalhes.get("observacoes")
+            if obs:
+                detalhes_card_body.append({"type": "TextBlock", "text": "**Observações:**", "wrap": True, "weight": "Bolder"})
+                detalhes_card_body.append({"type": "TextBlock", "text": obs, "wrap": True})
+
+            # contadores
+            pend = detalhes.get("pendentes_total")
+            concl = detalhes.get("concluidas_total")
+            if pend is not None or concl is not None:
+                detalhes_card_body.append({"type": "TextBlock", "text": f"Pendentes: {pend} — Concluídas: {concl}", "wrap": True})
+        else:
+            detalhes_card_body.append({"type": "TextBlock", "text": "Não foi possível carregar detalhes agora.", "wrap": True})
+
+        # localizar o Action.ShowCard e inserir o body
+        for act in card.get("actions", []):
+            if act.get("type") == "Action.ShowCard" and act.get("title") == "📝 Detalhes":
+                act_card = act.get("card")
+                if act_card is not None and isinstance(act_card, dict):
+                    act_card["body"] = detalhes_card_body
+    except Exception:
+        # não quebrar a geração do card se algo falhar aqui
+        pass
     
     return card
 

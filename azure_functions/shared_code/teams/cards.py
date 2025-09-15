@@ -9,8 +9,8 @@ import json
 from typing import Dict, Any, Optional
 from datetime import datetime, date
 
-# Usar helper do engine para montar deep-link consistente
-from engine.notification_engine import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
+# Usar helper neutro para montar deep-link consistente
+from utils.gclick_links import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
 
 
 def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str, Any]) -> Dict[str, Any]:
