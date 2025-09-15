@@ -734,21 +734,7 @@ def _process_card_action(body: dict) -> func.HttpResponse:
         confirmation_text = ""
         result_status = ""
 
-        if action_type == "dispensar":
-            try:
-                success = _dispensar_tarefa_gclick(task_id)
-                if success:
-                    confirmation_text = f"✅ Tarefa **{task_id}** dispensada no G-Click com sucesso!"
-                    result_status = "dispensada"
-                else:
-                    confirmation_text = f"⚠️ Não foi possível dispensar a tarefa **{task_id}** no G-Click."
-                    result_status = "erro_dispensar"
-            except Exception as e:
-                logger.error("Erro ao dispensar tarefa %s: %s", task_id, e)
-                confirmation_text = f"⚠️ Erro ao conectar com G-Click para dispensar a tarefa **{task_id}**."
-                result_status = "erro_conexao"
-
-        elif action_type == "finalizar":
+        if action_type == "finalizar":
             confirmation_text = (
                 f"✅ Tarefa **{task_id}** marcada como **finalizada** no seu chat.\n"
                 f"*(Status não alterado no G-Click)*"
@@ -794,48 +780,9 @@ def _dispensar_tarefa_gclick(task_id: str) -> bool:
     Returns:
         bool: True se dispensada com sucesso, False caso contrário
     """
-    try:
-        import requests
-        import os
-        
-        # URL base do G-Click
-        base_url = os.getenv("GCLICK_BASE_URL", "https://api.gclick.com.br")
-        
-        # Headers com autenticação (assume que já existe função para isso)
-        try:
-            # Tentar importar função de autenticação existente
-            if SHARED_DIR.exists():
-                sys.path.insert(0, str(SHARED_DIR))
-            from gclick.auth import get_auth_headers
-            headers = get_auth_headers()
-        except ImportError:
-            # Fallback: construir headers manualmente
-            token = os.getenv("GCLICK_TOKEN")
-            if not token:
-                logger.error("Token G-Click não configurado")
-                return False
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-        
-        # Endpoint para dispensar tarefa (adaptar conforme API real do G-Click)
-        # Nota: Este endpoint é uma suposição - deve ser confirmado com a documentação
-        endpoint = f"{base_url}/tarefas/{task_id}/status"
-        payload = {"status": "D"}  # D = Dispensado
-        
-        response = requests.put(endpoint, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            logger.info(f"Tarefa {task_id} dispensada com sucesso no G-Click")
-            return True
-        else:
-            logger.error(f"Falha ao dispensar tarefa {task_id}: HTTP {response.status_code} - {response.text}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Exceção ao dispensar tarefa {task_id}: {e}")
-        return False
+    # A funcionalidade de 'dispensar' foi removida por não existir API pública
+    logger.warning("Funcionalidade 'dispensar' desabilitada - chamada ignorada para task_id=%s", task_id)
+    return False
 
 # ─────────────────────────────────────────────────────────────
 # HTTP — Configuração dinâmica
