@@ -1,10 +1,11 @@
 from typing import List, Dict
 from datetime import date
 
-BASE_TAREFA_LINK = "https://app.gclick.com.br/tarefas/{id}"
+# Usar helper para gerar deep-link do G-Click
+from engine.notification_engine import montar_link_gclick_obrigacao
 
 def _linha_tarefa(t):
-    return f"- [{t.get('id')}] {t.get('nome')} (venc: {t.get('dataVencimento')}) → {BASE_TAREFA_LINK.format(id=t.get('id'))}"
+    return f"- [{t.get('id')}] {t.get('nome')} (venc: {t.get('dataVencimento')}) → {montar_link_gclick_obrigacao(t.get('id'))}"
 
 def montar_payload_usuario(
     apelido: str,
@@ -27,7 +28,7 @@ def montar_payload_usuario(
                 partes.append(_linha_tarefa(t))
         else:
             # Mostra apenas contagem + link
-            link = BASE_TAREFA_LINK.format(id=tarefas_hoje[0].get('id'))
+            link = montar_link_gclick_obrigacao(tarefas_hoje[0].get('id'))
             partes.append(f"- {len(tarefas_hoje)} obrigações vencem hoje. Ver lista: {link}")
 
     # Próximos dias
@@ -37,7 +38,7 @@ def montar_payload_usuario(
             for t in tarefas_proximas:
                 partes.append(_linha_tarefa(t))
         else:
-            link = BASE_TAREFA_LINK.format(id=tarefas_proximas[0].get('id'))
+            link = montar_link_gclick_obrigacao(tarefas_proximas[0].get('id'))
             partes.append(f"- {len(tarefas_proximas)} obrigações nos próximos dias. Ver lista: {link}")
 
     if not tarefas_hoje and not tarefas_proximas:

@@ -9,8 +9,11 @@ import json
 from typing import Dict, Any, Optional
 from datetime import datetime, date
 
+# Usar helper do engine para montar deep-link consistente
+from engine.notification_engine import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
 
-def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str, Any]) -> str:
+
+def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str, Any]) -> Dict[str, Any]:
     """
     Cria um Adaptive Card para notificação de tarefa/obrigação fiscal.
     
@@ -30,8 +33,8 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
     # Extrair dados do responsável
     nome_responsavel = responsavel.get("nome", responsavel.get("apelido", ""))
     
-    # URL para acessar a tarefa no G-Click
-    url_tarefa = f"https://app.gclick.com.br/tarefas/{id_tarefa}"
+    # URL deep-link correto para abrir a obrigação no G-Click
+    url_tarefa = montar_link_gclick_obrigacao(id_tarefa, EMPRESA_ID_PADRAO)
     
     # Determinar cor e ícone baseado na proximidade do vencimento
     cor_status, icone_status = _determine_urgency_style(data_vencimento)
@@ -150,18 +153,11 @@ def create_task_notification_card(tarefa: Dict[str, Any], responsavel: Dict[str,
                     "taskId": id_tarefa
                 }
             },
-            {
-                "type": "Action.Submit",
-                "title": "✖ Dispensar",
-                "data": {
-                    "action": "dispensar", 
-                    "taskId": id_tarefa
-                }
-            }
+            # botão 'Dispensar' removido por ausência de API pública suportada
         ]
     }
     
-    return json.dumps(card, ensure_ascii=False, indent=2)
+    return card
 
 
 def create_summary_notification_card(resumo: Dict[str, Any], responsavel: str) -> str:

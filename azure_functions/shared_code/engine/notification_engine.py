@@ -11,6 +11,7 @@ from typing import Dict as TDict
 MensagensBucket = TDict[str, List[Tuple[Dict[str, Any], str]]]
 
 import yaml
+import re
 
 from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
 from gclick.responsaveis import listar_responsaveis_tarefa
@@ -24,6 +25,36 @@ from storage.state import (
     marcar_envios_bem_sucedidos,
     criar_chave_idempotencia
 )
+
+# Helper: montar deep-link para abrir obrigação no G-Click
+EMPRESA_ID_PADRAO = int(os.getenv("GCLICK_EMPRESA_ID", "2557"))
+
+def montar_link_gclick_obrigacao(id_tarefa: Union[str, int], emp_id: int = EMPRESA_ID_PADRAO) -> str:
+    """
+    Constrói o deep-link oficial do G-Click para abrir a obrigação.
+    Aceita id no formato "4.65979" (preferencial), "4-65979", "465979" etc.
+    Regras:
+      - coid  = primeiro grupo numérico (antes do separador)
+      - eveId = segundo grupo numérico (depois do separador) 
+                (fallback: se não houver separador, usa tudo após o 1º dígito)
+    """
+    s = str(id_tarefa or "").strip()
+    # tenta capturar "NNN<sep>NNNNN" com qualquer separador não numérico
+    m = re.match(r"^\s*(\d+)\D+(\d+)\s*$", s)
+    if m:
+        coid, eve = m.group(1), m.group(2)
+    else:
+        # fallback tolerante (ex.: "465979"): 1º dígito vira coid, o resto vira eveId
+        digits = re.findall(r"\d+", s)
+        if not digits:
+            # último recurso: mostra lista
+            return "https://app.gclick.com.br/coListar.do?obj=coevento"
+        flat = "".join(digits)
+        if len(flat) >= 2:
+            coid, eve = flat[0], flat[1:]
+        else:
+            coid, eve = flat or "4", flat or "0"
+    return f"https://app.gclick.com.br/coListar.do?obj=coevento&coid={coid}&eveId={eve}&empId={emp_id}"
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -373,7 +404,7 @@ def formatar_mensagem_individual(apelido: str, buckets: Dict[str, List[Dict[str,
             if i < limite_detalhe:
                 partes.append(
                     f"- [{t['id']}] {t.get('nome') or t.get('titulo') or 'Tarefa'} (venc: {t['dataVencimento']}) → "
-                    f"https://app.gclick.com.br/tarefas/{t['id']}"
+                    f"{montar_link_gclick_obrigacao(t.get('id'))}"
                 )
             else:
                 partes.append(f"- {len(lista)-limite_detalhe} tarefa(s) adicionais.")
