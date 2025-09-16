@@ -7,9 +7,9 @@ import os
 import time
 import json
 import logging
-from typing import Any, Dict, Optional, Callable, Union
+from typing import Any, Dict, Optional, Callable
 from datetime import datetime, timedelta, date
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from threading import Lock
 import hashlib
 
@@ -143,7 +143,6 @@ class IntelligentCache:
     
     def _cleanup_expired(self):
         """Remove entradas expiradas."""
-        current_time = time.time()
         expired_keys = [
             key for key, entry in self._cache.items()
             if entry.is_expired()

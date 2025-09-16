@@ -67,6 +67,7 @@ class BotSender:
             
             # Define callback que será executado no contexto da conversa
             async def _send_callback(turn_context: TurnContext):
+                response = None
                 if card_json:
                     # Envio como cartão adaptativo
                     try:
@@ -80,19 +81,36 @@ class BotSender:
                             text=message,  # Texto de fallback caso o card não renderize
                             attachments=[card_attachment]
                         )
-                        await turn_context.send_activity(activity)
+                        response = await turn_context.send_activity(activity)
                         self.logger.info(f"Cartão adaptativo enviado para {user_id}")
                     except json.JSONDecodeError as e:
                         self.logger.error(f"Erro ao parsear JSON do cartão: {e}")
-                        # Fallback para mensagem de texto
-                        await turn_context.send_activity(message)
+                        response = await turn_context.send_activity(message)
                     except Exception as e:
                         self.logger.error(f"Erro ao enviar cartão: {e}")
-                        # Fallback para mensagem de texto
-                        await turn_context.send_activity(message)
+                        response = await turn_context.send_activity(message)
                 else:
                     # Envio como mensagem texto simples
-                    await turn_context.send_activity(message)
+                    response = await turn_context.send_activity(message)
+
+                # Tentar gravar o id da activity no conversation_storage se disponível
+                if response and hasattr(response, 'id') and response.id and self.conversation_storage:
+                    # Normalizar storage para suportar dict ou objeto com .references
+                    try:
+                        # Se for dict-like storage (ConversationReferenceStorage in this module)
+                        if hasattr(self.conversation_storage, 'references') and isinstance(self.conversation_storage.references, dict):
+                            existing = self.conversation_storage.references.get(user_id, {})
+                            if isinstance(existing, dict):
+                                existing.setdefault('last_activity', {})
+                                existing['last_activity']['id'] = response.id
+                                existing['last_activity']['timestamp'] = datetime.utcnow().isoformat()
+                                self.conversation_storage.references[user_id] = existing
+                                # tentar persistir
+                                if hasattr(self.conversation_storage, 'save'):
+                                    self.conversation_storage.save()
+                    except Exception:
+                        # Não obrigar a persistência se falhar
+                        self.logger.debug("Não foi possível salvar last_activity no storage para %s", user_id, exc_info=True)
                 
             # Continua a conversa usando a referência armazenada
             await self.adapter.continue_conversation(cref, _send_callback, self.app_id)
@@ -115,6 +133,48 @@ class BotSender:
             bool: True se enviado com sucesso, False caso contrário
         """
         return await self.send_message(user_id, fallback_message, card_json)
+
+    async def update_card(self, user_id: str, activity_id: str, card_json: str, fallback_message: str = "Notificação do G-Click") -> bool:
+        """
+        Atualiza um cartão/adaptive card previamente enviado (replace/update activity).
+        """
+        cref_data = self.conversation_storage.get(user_id)
+        if not cref_data:
+            self.logger.warning(f"Nenhuma referência para user_id={user_id} (update_card)")
+            return False
+
+        try:
+            if isinstance(cref_data, dict):
+                cref = ConversationReference().deserialize(cref_data)
+            else:
+                cref = cref_data
+        except Exception as e:
+            self.logger.error(f"Erro ao deserializar referência para update_card {user_id}: {e}")
+            return False
+
+        try:
+            MicrosoftAppCredentials.trust_service_url(cref.service_url)
+
+            async def _update_callback(turn_context: TurnContext):
+                try:
+                    card_data = json.loads(card_json)
+                    card_attachment = Attachment(
+                        content_type="application/vnd.microsoft.card.adaptive",
+                        content=card_data
+                    )
+                    activity = Activity(type="message", id=activity_id, text=fallback_message, attachments=[card_attachment])
+                    await turn_context.update_activity(activity)
+                    self.logger.info(f"Cartão atualizado para {user_id} activity_id={activity_id}")
+                    return True
+                except Exception as e:
+                    self.logger.error(f"Erro ao atualizar cartão para {user_id}: {e}", exc_info=True)
+                    return False
+
+            await self.adapter.continue_conversation(cref, _update_callback, self.app_id)
+            return True
+        except Exception as e:
+            self.logger.error(f"Falha ao atualizar mensagem para user_id={user_id}: {e}", exc_info=True)
+            return False
 
 class ConversationReferenceStorage:
     """Armazenamento persistente para referências de conversação."""

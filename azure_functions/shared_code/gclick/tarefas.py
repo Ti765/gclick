@@ -1,6 +1,5 @@
-import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Tuple, List, Dict, Any, Iterable, Optional
 from .auth import get_access_token  # Usar auth centralizado
 
@@ -44,7 +43,6 @@ def normalizar_tarefa(t: Dict[str, Any]) -> Dict[str, Any]:
     if dv and isinstance(dv, str):
         try:
             # Assumindo formato ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:mm:ss)
-            from datetime import datetime
             if 'T' in dv:
                 # Formato com tempo
                 r["_dt_dataVencimento"] = datetime.fromisoformat(dv.replace('Z', '')).date()

@@ -13,13 +13,14 @@ if os.path.isdir(SHARED) and SHARED not in sys.path:
 import importlib.util
 
 # Carregar módulo gclick.tarefas_detalhes diretamente
+os.environ.setdefault('GCLICK_API_BASE', 'https://appp.gclick.com.br/api/v1')
 spec = importlib.util.spec_from_file_location("gclick.tarefas_detalhes", os.path.join(ROOT, "gclick", "tarefas_detalhes.py"))
 mod_td = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod_td)
 resumir_detalhes_para_card = mod_td.resumir_detalhes_para_card
 
 # Carregar módulo teams.cards diretamente
-spec2 = importlib.util.spec_from_file_location("teams.cards", os.path.join(ROOT, "teams", "cards.py"))
+spec2 = importlib.util.spec_from_file_location("teams.cards", os.path.join(ROOT, "azure_functions", "shared_code", "teams", "cards.py"))
 mod_cards = importlib.util.module_from_spec(spec2)
 spec2.loader.exec_module(mod_cards)
 create_task_notification_card = mod_cards.create_task_notification_card

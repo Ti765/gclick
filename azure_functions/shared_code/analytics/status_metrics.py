@@ -1,7 +1,6 @@
 # analytics/status_metrics.py
 from collections import Counter
-from datetime import date
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 # Definições padrão (podem ser importadas em outros lugares)
 OPEN_STATUSES = {"A", "P", "Q", "S"}

@@ -44,7 +44,7 @@ FEATURES = {
     "notification_engine": os.getenv("FEATURE_NOTIFICATION_ENGINE", "true").lower() == "true",
     "adaptive_cards": os.getenv("FEATURE_ADAPTIVE_CARDS", "true").lower() == "true",
     "conversation_storage": os.getenv("FEATURE_CONVERSATION_STORAGE", "true").lower() == "true",
-    "debug_endpoints": os.getenv("FEATURE_DEBUG_ENDPOINTS", "true").lower() == "true",
+    "debug_endpoints": os.getenv("FEATURE_DEBUG_ENDPOINTS", "false").lower() == "true",  # desabilitado por padrão em produção
     "scheduled_notifications": os.getenv("FEATURE_SCHEDULED_NOTIFICATIONS", "true").lower() == "true"
 }
 
@@ -263,10 +263,7 @@ if FEATURES["teams_bot"] and APP_ID and APP_PASSWORD and import_style != "degrad
                     import engine.notification_engine as ne  # type: ignore
                 
                 ne.bot_sender = bot_sender
-                ne.adapter = adapter
-                if FEATURES["conversation_storage"]:
-                    ne.conversation_storage = conversation_storage
-                logger.info("🔗  ConversationStorage integrado à NotificationEngine")
+                logger.info("🔗  BotSender integrado à NotificationEngine (com ConversationStorage)")
             except Exception as integration_err:
                 logger.warning("⚠️  Falha na integração com NotificationEngine: %s", integration_err)
 
@@ -916,10 +913,8 @@ def resilience_metrics(req: func.HttpRequest) -> func.HttpResponse:
         try:
             try:
                 from shared_code.engine.resilience import resilience_manager
-                from shared_code.engine.cache import IntelligentCache
             except ImportError:
                 from engine.resilience import resilience_manager
-                from engine.cache import IntelligentCache
             
             resilience_stats = resilience_manager.get_stats()
             

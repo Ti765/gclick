@@ -1,12 +1,11 @@
 import os
 import json
 import logging
-import asyncio
 from typing import Optional, Union
 from pathlib import Path
 from datetime import datetime
 
-from botbuilder.core import BotFrameworkAdapter, TurnContext
+from botbuilder.core import TurnContext
 from botbuilder.schema import Activity, ConversationReference, Attachment
 from botframework.connector.auth import MicrosoftAppCredentials
 
@@ -106,8 +105,20 @@ class BotSender:
                             text=message,  # fallback
                             attachments=[card_attachment]
                         )
-                        await turn_context.send_activity(activity)
-                        self.logger.info(f"Cartão adaptativo enviado para {user_id}")
+                        resp = await turn_context.send_activity(activity)
+                        self.logger.info(f"Cartão adaptativo enviado para {user_id} id={getattr(resp, 'id', None)}")
+                        # tentar gravar id da activity no storage
+                        try:
+                            if getattr(resp, 'id', None):
+                                existing = self.references.get(user_id, {})
+                                if isinstance(existing, dict):
+                                    existing.setdefault('last_activity', {})
+                                    existing['last_activity']['id'] = resp.id
+                                    existing['last_activity']['timestamp'] = datetime.utcnow().isoformat()
+                                    self.references[user_id] = existing
+                                    self.save()
+                        except Exception:
+                            self.logger.debug("Falha ao salvar last_activity", exc_info=True)
                     except Exception as e:
                         self.logger.error(f"Erro ao enviar cartão: {e}")
                         await turn_context.send_activity(message)  # fallback de texto
@@ -420,3 +431,43 @@ class ConversationReferenceStorage:
             self.save()
             return True
         return False
+
+    async def update_card(self, user_id: str, activity_id: str, card_json: str, fallback_message: str = "Notificação do G-Click") -> bool:
+        """
+        Atualiza um cartão previamente enviado (replace/update activity) usando a activity id.
+        """
+        cref_data = self.get(user_id)
+        if not cref_data:
+            self.logger.warning("update_card: referência não encontrada for %s", user_id)
+            return False
+
+        try:
+            if isinstance(cref_data, dict) and cref_data.get('version') == '2.0':
+                conv = cref_data.get('conversation_data', cref_data)
+            else:
+                conv = cref_data
+            cref = ConversationReference().deserialize(conv)
+        except Exception as e:
+            self.logger.error("update_card: erro ao desserializar cref: %s", e, exc_info=True)
+            return False
+
+        try:
+            MicrosoftAppCredentials.trust_service_url(cref.service_url)
+
+            async def _update_cb(turn_context: TurnContext):
+                try:
+                    card_data = json.loads(card_json) if isinstance(card_json, str) else card_json
+                    card_attachment = Attachment(content_type="application/vnd.microsoft.card.adaptive", content=card_data)
+                    activity = Activity(type="message", id=activity_id, text=fallback_message, attachments=[card_attachment])
+                    await turn_context.update_activity(activity)
+                    self.logger.info("update_card: atualizado %s id=%s", user_id, activity_id)
+                    return True
+                except Exception as e:
+                    self.logger.error("update_card: falha ao atualizar: %s", e, exc_info=True)
+                    return False
+
+            await self.adapter.continue_conversation(cref, _update_cb, self.app_id)
+            return True
+        except Exception as e:
+            self.logger.error("update_card: erro ao executar continue_conversation: %s", e, exc_info=True)
+            return False

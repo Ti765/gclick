@@ -10,14 +10,21 @@ import re
 
 logger = logging.getLogger(__name__)
 
-GCLICK_API_BASE = os.getenv("GCLICK_API_BASE", "https://appp.gclick.com.br/api/v1")
+GCLICK_API_BASE = os.getenv("GCLICK_API_BASE")
+if not GCLICK_API_BASE:
+    raise RuntimeError("GCLICK_API_BASE não configurado")
+
 GCLICK_API_TOKEN = os.getenv("GCLICK_API_TOKEN", "")
 # Template configurável caso seu endpoint real seja diferente
 # Use placeholders {eveId} e {coId}. Ex.: "{base}/tarefas/{eveId}"
 GCLICK_TASK_DETAILS_TMPL = os.getenv("GCLICK_TASK_DETAILS_TMPL", "{base}/tarefas/{eveId}")
 
+# Permitir desabilitar verificação SSL via env (apenas se necessário em ambientes corp)
+GCLICK_API_VERIFY = os.getenv("GCLICK_API_VERIFY", "true").lower() not in ("0", "false", "no")
+
 # sessão HTTP com auth
 _session = requests.Session()
+_session.verify = GCLICK_API_VERIFY
 if GCLICK_API_TOKEN:
     _session.headers.update({"Authorization": f"Bearer {GCLICK_API_TOKEN}"})
 _session.headers.update({"Accept": "application/json"})
@@ -37,21 +44,51 @@ def _split_task_id(task_id: str) -> Tuple[str, str]:
     return s[0], s[1:]
 
 
-def _try_get(url: str, timeout: int = 12) -> Optional[Dict[str, Any]]:
-    attempts = 2
+def _try_get(url: str, timeout: int = 12, attempts: int = 3) -> Optional[Dict[str, Any]]:
+    """GET tolerante com retry exponencial e tratamento de 429 Retry-After."""
     for i in range(attempts):
         try:
             r = _session.get(url, timeout=timeout)
             if r.status_code == 200:
-                return r.json() or {}
+                try:
+                    return r.json() or {}
+                except Exception:
+                    logger.warning("[GCLICK] Erro ao decodificar JSON de %s", url)
+                    return {}
+            if r.status_code == 429:
+                ra = r.headers.get("Retry-After")
+                wait = None
+                if ra:
+                    try:
+                        wait = int(ra)
+                    except Exception:
+                        try:
+                            # alguns servidores retornam HTTP date
+                            from email.utils import parsedate_to_datetime
+
+                            dt = parsedate_to_datetime(ra)
+                            wait = max(1, int((dt - datetime.utcnow()).total_seconds()))
+                        except Exception:
+                            wait = None
+                if wait is None:
+                    wait = 2 ** i
+                logger.info("[GCLICK] 429 Retry-After=%s, aguardando %s s para %s", ra, wait, url)
+                time.sleep(max(0.5, wait))
+                continue
+            if 500 <= r.status_code < 600 and i + 1 < attempts:
+                # server error - backoff
+                backoff = 2 ** i
+                logger.info("[GCLICK] HTTP %s em %s, tentando novamente em %ss", r.status_code, url, backoff)
+                time.sleep(backoff)
+                continue
             logger.warning("[GCLICK] %s -> HTTP %s", url, r.status_code)
-            if 400 <= r.status_code < 500:
-                # client error - não tenta novamente
-                break
+            # client errors or non-retriable server errors
+            return None
         except Exception as e:
-            logger.warning("[GCLICK] Falha GET %s (attempt %s): %s", url, i + 1, e)
-        if i + 1 < attempts:
-            time.sleep(0.4 * (i + 1))
+            logger.warning("[GCLICK] Falha GET %s (attempt %d): %s", url, i + 1, e)
+            if i + 1 < attempts:
+                time.sleep(2 ** i)
+                continue
     return None
 
 
