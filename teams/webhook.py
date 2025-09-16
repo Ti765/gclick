@@ -7,7 +7,8 @@ WEBHOOK_URL_ENV = "TEAMS_WEBHOOK_URL"
 def enviar_teams_mensagem(texto: str, max_retries: int = 3, backoff: float = 1.5):
     url = os.environ.get(WEBHOOK_URL_ENV)
     if not url:
-        raise RuntimeError("TEAMS_WEBHOOK_URL não definido no ambiente.")
+        print("[WEBHOOK] TEAMS_WEBHOOK_URL não configurado — salto do envio via webhook.")
+        return None
     payload = {"text": texto}
     tentativa = 0
     while True:

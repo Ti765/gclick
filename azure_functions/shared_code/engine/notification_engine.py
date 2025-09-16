@@ -191,12 +191,16 @@ except ImportError:
 bot_sender = None
 try:
     # Não precisamos importar BotSender aqui; o function_app injeta bot_sender neste módulo.
-    from ..teams.user_mapping import mapear_apelido_para_teams_id
+    from ..teams.user_mapping import mapear_apelido_para_teams_id, is_test_mode, get_test_user_id
     logging.info("[ENGINE] Mapeador de usuário do Teams disponível")
 except ImportError as e:
     logging.warning(f"[BOT] Falha ao importar user_mapping: {e}")
     def mapear_apelido_para_teams_id(apelido: str):
         return None
+    def is_test_mode() -> bool:
+        return False
+    def get_test_user_id() -> str:
+        return ""
 
 
 STATUS_ABERTOS = {"A", "P", "Q", "S"}
@@ -641,8 +645,18 @@ def run_notification_cycle(
     else:
         if resumo_global_msg:
             try:
+                # Em modo de teste, ou quando o bot está disponível, priorizar envio via bot
                 if bot_sender:
-                    logger.info("[BOT] Resumo global pronto para envio (adapte canal/alvo).")
+                    try:
+                        if is_test_mode():
+                            target = get_test_user_id()
+                            logger.info("[BOT][TEST_MODE] Enviando resumo global via bot para %s", target)
+                            _run_coro_safely(bot_sender.send_message(target, resumo_global_msg))
+                        else:
+                            # Não temos um canal global definido para o bot; apenas logar que está pronto
+                            logger.info("[BOT] Resumo global pronto para envio (bot disponível, sem destino explícito).")
+                    except Exception as e:
+                        logger.warning("Falha envio resumo global via bot: %s", e)
                 else:
                     enviar_teams_mensagem(resumo_global_msg)
             except Exception as e:
@@ -661,8 +675,16 @@ def run_notification_cycle(
                 mensagem_enviada = False
 
                 if bot_sender:
-                    teams_id = mapear_apelido_para_teams_id(apelido)
-                    if teams_id and _has_conversation(getattr(bot_sender, "conversation_storage", None), teams_id):
+                    # Em TEST_MODE, redirecionar todas as notificações para o usuário de teste
+                    if is_test_mode():
+                        teams_id = get_test_user_id()
+                        logger.info("🧪 [TEST_MODE] Forçando envio via bot para %s (original: %s)", teams_id, apelido)
+                    else:
+                        teams_id = mapear_apelido_para_teams_id(apelido)
+
+                    # Decidir enviar via bot: se temos conversation ou estamos em TEST_MODE
+                    has_conv = _has_conversation(getattr(bot_sender, "conversation_storage", None), teams_id) if teams_id else False
+                    if teams_id and (has_conv or is_test_mode()):
                         try:
                             for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
                                 for tarefa, chave in lista_tarefas_chaves:
@@ -717,19 +739,25 @@ def run_notification_cycle(
                                 logging.warning(f"[BOT] ❌ Nenhum card enviado via bot para {apelido}")
                         except Exception as bot_error:
                             logging.warning(f"[BOT] ❌ Falha geral para {apelido}: {bot_error}")
-
                 if not mensagem_enviada:
-                    try:
-                        enviar_teams_mensagem(f"{apelido}:\n{msg}")
-                        for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
-                            for _tarefa, chave in lista_tarefas_chaves:
-                                envios_realizados_responsavel.append((chave, True))
-                        logging.info(f"[WEBHOOK] ✅ Enviado para {apelido}")
-                    except Exception as webhook_error:
-                        logging.error(f"[WEBHOOK] ❌ Falha para {apelido}: {webhook_error}")
+                    # Quando o bot está disponível, evitar fallback para webhook — o bot é a fonte de verdade
+                    if bot_sender:
+                        logging.error(f"[BOT] ❌ Mensagem para {apelido} não entregue via bot e fallback por webhook está desabilitado quando o bot está ativo.")
                         for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
                             for _tarefa, chave in lista_tarefas_chaves:
                                 envios_realizados_responsavel.append((chave, False))
+                    else:
+                        try:
+                            enviar_teams_mensagem(f"{apelido}:\n{msg}")
+                            for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                                for _tarefa, chave in lista_tarefas_chaves:
+                                    envios_realizados_responsavel.append((chave, True))
+                            logging.info(f"[WEBHOOK] ✅ Enviado para {apelido}")
+                        except Exception as webhook_error:
+                            logging.error(f"[WEBHOOK] ❌ Falha para {apelido}: {webhook_error}")
+                            for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                                for _tarefa, chave in lista_tarefas_chaves:
+                                    envios_realizados_responsavel.append((chave, False))
 
                 marcar_envios_bem_sucedidos(envios_realizados_responsavel, state_storage)
 

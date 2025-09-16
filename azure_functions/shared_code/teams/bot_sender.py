@@ -59,6 +59,14 @@ class BotSender:
         Returns:
             bool: True se enviado com sucesso, False caso contrário
         """
+        # Se estivermos em TEST_MODE, forçar todas as mensagens para o TEST_USER_TEAMS_ID
+        test_mode = os.environ.get('TEST_MODE', 'false').lower() in ('1', 'true', 'yes')
+        if test_mode:
+            test_user = os.environ.get('TEST_USER_TEAMS_ID', '')
+            if test_user:
+                self.logger.info("🧪 [TEST_MODE] Forçando envio para %s (original: %s)", test_user, user_id)
+                user_id = test_user
+
         # Verificar se conversation_storage está disponível
         if not self.conversation_storage:
             self.logger.warning(f"ConversationStorage não configurado - não é possível enviar para {user_id}")

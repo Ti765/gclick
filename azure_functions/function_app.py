@@ -1221,8 +1221,22 @@ def run_cycle_now(req: func.HttpRequest) -> func.HttpResponse:
     try:
         dias = int(req.params.get("dias", CONFIG.get("dias_proximos_morning", 3)))
         full = req.params.get("full", "true").lower() == "true"
+        # Novo: se fornecido, força envio de mensagem de teste via bot
+        force_test = req.params.get("force_test", "false").lower() in ("1", "true", "yes")
         
-        logger.info("🚀 Executando ciclo manual: dias=%d, full_scan=%s", dias, full)
+        logger.info("🚀 Executando ciclo manual: dias=%d, full_scan=%s, force_test=%s", dias, full, force_test)
+        # Se solicitarem force_test e o bot estiver configurado, enviar mensagem de teste imediata
+        if force_test and bot_sender:
+            try:
+                test_target = os.getenv("TEST_USER_TEAMS_ID") or os.getenv("TEAMS_USER_MAP_JSON")
+                test_msg = os.getenv("TEST_MESSAGE_TEXT", "Mensagem de teste via Bot - por favor ignore")
+                logger.info("🧪 Force test: enviando mensagem de teste para %s", test_target)
+                sent = run_async(bot_sender.send_message(test_target, test_msg))
+                return _json({"status": "force_test_sent", "target": test_target, "sent": bool(sent)})
+            except Exception as e:
+                logger.exception("💥 Falha ao enviar mensagem de teste via bot: %s", e)
+                return _json({"status": "force_test_failed", "error": str(e)}, status=500)
+
         result = _run_cycle("manual", dias_proximos=dias, full_scan=full)
         
         return _json({
