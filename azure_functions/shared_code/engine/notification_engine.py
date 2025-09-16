@@ -191,12 +191,16 @@ except ImportError:
 bot_sender = None
 try:
     # Não precisamos importar BotSender aqui; o function_app injeta bot_sender neste módulo.
-    from ..teams.user_mapping import mapear_apelido_para_teams_id
+    from ..teams.user_mapping import mapear_apelido_para_teams_id, is_test_mode, get_test_user_id
     logging.info("[ENGINE] Mapeador de usuário do Teams disponível")
 except ImportError as e:
     logging.warning(f"[BOT] Falha ao importar user_mapping: {e}")
     def mapear_apelido_para_teams_id(apelido: str):
         return None
+    def is_test_mode() -> bool:
+        return False
+    def get_test_user_id() -> str:
+        return ""
 
 
 STATUS_ABERTOS = {"A", "P", "Q", "S"}
@@ -238,6 +242,16 @@ def load_notifications_config(path="config/notifications.yaml") -> dict:
             logger.warning("⚠️ Erro ao carregar YAML %s: %s", path, e)
 
     config = {**default_config, **yaml_config}
+
+    # Detect common typos / unknown keys and warn developers early.
+    expected_top_keys = {"notifications", "defaults"}
+    unknown = set(yaml_config.keys()) - expected_top_keys
+    if unknown:
+        logging.warning(
+            "Config de notificações contém chaves desconhecidas: %s. "
+            "Verifique por erros de digitação como 'dias_proxximos' (deveria ser 'dias_proximos').",
+            ", ".join(sorted(unknown)),
+        )
 
     env_mappings = {
         "DIAS_PROXIMOS": "dias_proximos",
@@ -601,7 +615,7 @@ def run_notification_cycle(
             bkt_filtrado = aplicar_filtro_idempotencia(bkt, apelido, hoje, state_storage)
             if not bkt_filtrado:
                 if verbose:
-                    print(f"[SKIP] Todas as tarefas já foram notificadas hoje: {apelido}")
+                    logger.debug("[SKIP] Todas as tarefas já foram notificadas hoje: %s", apelido)
                 continue
         else:
             bkt_filtrado = {
@@ -621,22 +635,32 @@ def run_notification_cycle(
 
     # 7) Envio
     if execution_mode == 'dry_run':
-        print(f"[INFO] DRY-RUN run_id={run_id} – Mensagens preparadas:")
+        logger.info("DRY-RUN run_id=%s – Mensagens preparadas", run_id)
         if resumo_global_msg:
-            print("----\n[RESUMO GLOBAL]\n" + resumo_global_msg)
+            logger.info("[RESUMO GLOBAL]\n%s", resumo_global_msg)
         for apelido, msg, _bkt in mensagens_enviadas:
-            print("----")
-            print(f"[{apelido}]\n{msg}")
-        print(f"[INFO] DRY-RUN concluído. (responsáveis selecionados={len(mensagens_enviadas)})")
+            logger.info("----")
+            logger.info("[%s]\n%s", apelido, msg)
+        logger.info("DRY-RUN concluído. (responsáveis selecionados=%d)", len(mensagens_enviadas))
     else:
         if resumo_global_msg:
             try:
+                # Em modo de teste, ou quando o bot está disponível, priorizar envio via bot
                 if bot_sender:
-                    logging.info("[BOT] Resumo global pronto para envio (adapte canal/alvo).")
+                    try:
+                        if is_test_mode():
+                            target = get_test_user_id()
+                            logger.info("[BOT][TEST_MODE] Enviando resumo global via bot para %s", target)
+                            _run_coro_safely(bot_sender.send_message(target, resumo_global_msg))
+                        else:
+                            # Não temos um canal global definido para o bot; apenas logar que está pronto
+                            logger.info("[BOT] Resumo global pronto para envio (bot disponível, sem destino explícito).")
+                    except Exception as e:
+                        logger.warning("Falha envio resumo global via bot: %s", e)
                 else:
                     enviar_teams_mensagem(resumo_global_msg)
             except Exception as e:
-                print(f"[WARN] Falha envio resumo global: {e}")
+                logger.warning("Falha envio resumo global: %s", e)
 
         # Import tardio do card para evitar ciclos/ImportError prematuro
         try:
@@ -651,8 +675,16 @@ def run_notification_cycle(
                 mensagem_enviada = False
 
                 if bot_sender:
-                    teams_id = mapear_apelido_para_teams_id(apelido)
-                    if teams_id and _has_conversation(getattr(bot_sender, "conversation_storage", None), teams_id):
+                    # Em TEST_MODE, redirecionar todas as notificações para o usuário de teste
+                    if is_test_mode():
+                        teams_id = get_test_user_id()
+                        logger.info("🧪 [TEST_MODE] Forçando envio via bot para %s (original: %s)", teams_id, apelido)
+                    else:
+                        teams_id = mapear_apelido_para_teams_id(apelido)
+
+                    # Decidir enviar via bot: se temos conversation ou estamos em TEST_MODE
+                    has_conv = _has_conversation(getattr(bot_sender, "conversation_storage", None), teams_id) if teams_id else False
+                    if teams_id and (has_conv or is_test_mode()):
                         try:
                             for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
                                 for tarefa, chave in lista_tarefas_chaves:
@@ -707,26 +739,32 @@ def run_notification_cycle(
                                 logging.warning(f"[BOT] ❌ Nenhum card enviado via bot para {apelido}")
                         except Exception as bot_error:
                             logging.warning(f"[BOT] ❌ Falha geral para {apelido}: {bot_error}")
-
                 if not mensagem_enviada:
-                    try:
-                        enviar_teams_mensagem(f"{apelido}:\n{msg}")
-                        for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
-                            for _tarefa, chave in lista_tarefas_chaves:
-                                envios_realizados_responsavel.append((chave, True))
-                        logging.info(f"[WEBHOOK] ✅ Enviado para {apelido}")
-                    except Exception as webhook_error:
-                        logging.error(f"[WEBHOOK] ❌ Falha para {apelido}: {webhook_error}")
+                    # Quando o bot está disponível, evitar fallback para webhook — o bot é a fonte de verdade
+                    if bot_sender:
+                        logging.error(f"[BOT] ❌ Mensagem para {apelido} não entregue via bot e fallback por webhook está desabilitado quando o bot está ativo.")
                         for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
                             for _tarefa, chave in lista_tarefas_chaves:
                                 envios_realizados_responsavel.append((chave, False))
+                    else:
+                        try:
+                            enviar_teams_mensagem(f"{apelido}:\n{msg}")
+                            for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                                for _tarefa, chave in lista_tarefas_chaves:
+                                    envios_realizados_responsavel.append((chave, True))
+                            logging.info(f"[WEBHOOK] ✅ Enviado para {apelido}")
+                        except Exception as webhook_error:
+                            logging.error(f"[WEBHOOK] ❌ Falha para {apelido}: {webhook_error}")
+                            for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                                for _tarefa, chave in lista_tarefas_chaves:
+                                    envios_realizados_responsavel.append((chave, False))
 
                 marcar_envios_bem_sucedidos(envios_realizados_responsavel, state_storage)
 
                 if verbose:
                     sucessos = sum(1 for _, sucesso in envios_realizados_responsavel if sucesso)
                     total = len(envios_realizados_responsavel)
-                    print(f"[ENVIADO] {apelido} - {sucessos}/{total} tarefas enviadas com sucesso")
+                    logger.debug("[ENVIADO] %s - %d/%d tarefas enviadas com sucesso", apelido, sucessos, total)
 
                 if rate_limit_sleep_ms > 0:
                     time.sleep(rate_limit_sleep_ms / 1000.0)

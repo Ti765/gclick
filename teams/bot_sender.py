@@ -45,6 +45,14 @@ class BotSender:
         Returns:
             bool: True se enviado com sucesso, False caso contrário
         """
+        # Se estivermos em TEST_MODE, forçar todas as mensagens para o TEST_USER_TEAMS_ID
+        test_mode = os.environ.get('TEST_MODE', 'false').lower() in ('1', 'true', 'yes')
+        if test_mode:
+            test_user = os.environ.get('TEST_USER_TEAMS_ID', '')
+            if test_user:
+                self.logger.info("🧪 [TEST_MODE] Forçando envio para %s (original: %s)", test_user, user_id)
+                user_id = test_user
+
         # Usa o storage em tempo real, não uma cópia
         cref_data = self.conversation_storage.get(user_id)
         if not cref_data:
@@ -94,9 +102,9 @@ class BotSender:
                     response = await turn_context.send_activity(message)
 
                 # Tentar gravar o id da activity no conversation_storage se disponível
-                if response and hasattr(response, 'id') and response.id and self.conversation_storage:
-                    # Normalizar storage para suportar dict ou objeto com .references
-                    try:
+                try:
+                    if response and hasattr(response, 'id') and response.id and self.conversation_storage:
+                        # Normalizar storage para suportar dict ou objeto com .references
                         # Se for dict-like storage (ConversationReferenceStorage in this module)
                         if hasattr(self.conversation_storage, 'references') and isinstance(self.conversation_storage.references, dict):
                             existing = self.conversation_storage.references.get(user_id, {})
@@ -107,10 +115,13 @@ class BotSender:
                                 self.conversation_storage.references[user_id] = existing
                                 # tentar persistir
                                 if hasattr(self.conversation_storage, 'save'):
-                                    self.conversation_storage.save()
-                    except Exception:
-                        # Não obrigar a persistência se falhar
-                        self.logger.debug("Não foi possível salvar last_activity no storage para %s", user_id, exc_info=True)
+                                    try:
+                                        self.conversation_storage.save()
+                                    except Exception:
+                                        self.logger.debug("Falha ao salvar conversation_storage após atualizar last_activity", exc_info=True)
+                except Exception:
+                    # Não obrigar a persistência se falhar
+                    self.logger.debug("Não foi possível salvar last_activity no storage para %s", user_id, exc_info=True)
                 
             # Continua a conversa usando a referência armazenada
             await self.adapter.continue_conversation(cref, _send_callback, self.app_id)

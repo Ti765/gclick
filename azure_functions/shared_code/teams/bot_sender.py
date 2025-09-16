@@ -59,6 +59,14 @@ class BotSender:
         Returns:
             bool: True se enviado com sucesso, False caso contrário
         """
+        # Se estivermos em TEST_MODE, forçar todas as mensagens para o TEST_USER_TEAMS_ID
+        test_mode = os.environ.get('TEST_MODE', 'false').lower() in ('1', 'true', 'yes')
+        if test_mode:
+            test_user = os.environ.get('TEST_USER_TEAMS_ID', '')
+            if test_user:
+                self.logger.info("🧪 [TEST_MODE] Forçando envio para %s (original: %s)", test_user, user_id)
+                user_id = test_user
+
         # Verificar se conversation_storage está disponível
         if not self.conversation_storage:
             self.logger.warning(f"ConversationStorage não configurado - não é possível enviar para {user_id}")
@@ -86,6 +94,7 @@ class BotSender:
             
             # Define callback que será executado no contexto da conversa
             async def _send_callback(turn_context: TurnContext):
+                resp = None
                 if card_json:
                     # Envio como cartão adaptativo (tolerante a str ou dict)
                     try:
@@ -106,24 +115,32 @@ class BotSender:
                             attachments=[card_attachment]
                         )
                         resp = await turn_context.send_activity(activity)
-                        self.logger.info(f"Cartão adaptativo enviado para {user_id} id={getattr(resp, 'id', None)}")
-                        # tentar gravar id da activity no storage
-                        try:
-                            if getattr(resp, 'id', None):
-                                existing = self.references.get(user_id, {})
-                                if isinstance(existing, dict):
-                                    existing.setdefault('last_activity', {})
-                                    existing['last_activity']['id'] = resp.id
-                                    existing['last_activity']['timestamp'] = datetime.utcnow().isoformat()
-                                    self.references[user_id] = existing
-                                    self.save()
-                        except Exception:
-                            self.logger.debug("Falha ao salvar last_activity", exc_info=True)
+                        self.logger.info("Cartão adaptativo enviado para %s id=%s", user_id, getattr(resp, 'id', None))
                     except Exception as e:
-                        self.logger.error(f"Erro ao enviar cartão: {e}")
-                        await turn_context.send_activity(message)  # fallback de texto
+                        self.logger.error("Erro ao enviar cartão: %s", e)
+                        resp = await turn_context.send_activity(message)  # fallback de texto
                 else:
-                    await turn_context.send_activity(message)
+                    resp = await turn_context.send_activity(message)
+
+                # Tentar gravar o id da activity no conversation_storage se disponível (para cards e textos)
+                try:
+                    if resp and getattr(resp, 'id', None) and getattr(self, 'conversation_storage', None):
+                        try:
+                            existing = self.conversation_storage.references.get(user_id, {})
+                        except Exception:
+                            existing = {}
+                        if isinstance(existing, dict):
+                            existing.setdefault('last_activity', {})
+                            existing['last_activity']['id'] = resp.id
+                            existing['last_activity']['timestamp'] = datetime.utcnow().isoformat()
+                            # gravar de volta e persistir
+                            self.conversation_storage.references[user_id] = existing
+                            try:
+                                self.conversation_storage.save()
+                            except Exception:
+                                self.logger.debug("Falha ao salvar conversation_storage após atualizar last_activity", exc_info=True)
+                except Exception:
+                    self.logger.debug("Falha ao atualizar last_activity no conversation_storage", exc_info=True)
                 
             # Continua a conversa usando a referência armazenada
             await self.adapter.continue_conversation(cref, _send_callback, self.app_id)
