@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from config.loader import load_config
+from azure_functions.shared_code.config.loader import load_config
 
 def construir_url_tarefa(tid: str) -> str:
     cfg = load_config()

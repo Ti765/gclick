@@ -1,5 +1,5 @@
 from typing import List, Dict, Any, Callable
-from config.loader import load_config
+from azure_functions.shared_code.config.loader import load_config
 
 def _match_responsavel(responsavel: Dict[str, Any], wl_normalizada) -> bool:
     rid = responsavel.get("id")

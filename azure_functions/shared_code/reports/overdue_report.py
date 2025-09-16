@@ -6,8 +6,14 @@ Utiliza pandas e openpyxl para criar relatórios profissionais.
 from __future__ import annotations
 import os
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime, date
+from threading import Lock
+
+# Lock global para proteger operações de escrita de arquivo
+_reports_lock = Lock()
 
 def _resolve_reports_dir(base_dir: str | None = None) -> Path:
     """
@@ -47,6 +53,7 @@ def gerar_relatorio_tarefas_atrasadas(tarefas_atrasadas: list, base_dir: str | N
 def gerar_relatorio_excel_overdue(tarefas_atrasadas: list, output_dir: str | None = None, hoje: date | None = None) -> str:
     """
     Gera Excel com tarefas >1 dia de atraso (ou conforme política do chamador).
+    Thread-safe: utiliza lock para operações de escrita e arquivos temporários.
     
     Args:
         tarefas_atrasadas: Lista de tarefas filtradas
@@ -58,7 +65,13 @@ def gerar_relatorio_excel_overdue(tarefas_atrasadas: list, output_dir: str | Non
     """
     try:
         # Import preguiçoso para não punir cold start quando não precisa
-        import pandas as pd  # type: ignore
+        try:
+            import pandas as pd  # type: ignore
+            import openpyxl  # noqa: F401  # Requerido pelo pandas como engine xlsx, não usado diretamente
+        except ImportError as ie:
+            logging.warning("Dependências para relatórios Excel não instaladas: %s", ie)
+            logging.warning("Instale com: pip install pandas openpyxl")
+            return ""
 
         out_dir = _resolve_reports_dir(output_dir)
         if hoje is None:
@@ -68,17 +81,21 @@ def gerar_relatorio_excel_overdue(tarefas_atrasadas: list, output_dir: str | Non
         arquivo_datado = out_dir / f"tarefas_atrasadas_{data_str}.xlsx"
         arquivo_latest = out_dir / "tarefas_atrasadas_latest.xlsx"
 
-        if not tarefas_atrasadas:
-            # Criar arquivo indicando que não há tarefas atrasadas
-            with pd.ExcelWriter(arquivo_datado, engine="openpyxl") as writer:
-                pd.DataFrame({
-                    "Mensagem": ["Nenhuma tarefa com atraso acima da política atual"],
-                    "Data_Verificacao": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
-                }).to_excel(writer, sheet_name="Resumo", index=False)
-        else:
-            # Preparar dados das tarefas
-            linhas = _preparar_dados_excel(tarefas_atrasadas, hoje)
-            df = pd.DataFrame(linhas)
+        # Usar arquivo temporário para evitar arquivos corrompidos
+        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
+            temp_path = Path(tmp_file.name)
+
+            if not tarefas_atrasadas:
+                # Criar arquivo indicando que não há tarefas atrasadas
+                with pd.ExcelWriter(temp_path, engine="openpyxl") as writer:
+                    pd.DataFrame({
+                        "Mensagem": ["Nenhuma tarefa com atraso acima da política atual"],
+                        "Data_Verificacao": [datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+                    }).to_excel(writer, sheet_name="Resumo", index=False)
+            else:
+                # Preparar dados das tarefas
+                linhas = _preparar_dados_excel(tarefas_atrasadas, hoje)
+                df = pd.DataFrame(linhas)
             
             # Resumo por responsável
             if not df.empty:
@@ -124,11 +141,16 @@ def gerar_relatorio_excel_overdue(tarefas_atrasadas: list, output_dir: str | Non
                 }
                 pd.DataFrame(stats).to_excel(writer, sheet_name="Estatísticas", index=False)
 
-        # Criar cópia latest para facilitar acesso
-        import shutil
-        shutil.copy2(arquivo_datado, arquivo_latest)
-        
-        logging.info(f"[REPORT] Relatório Excel gerado: {arquivo_datado}")
+            # Atomic move para o destino final
+            with _reports_lock:
+                shutil.move(str(temp_path), str(arquivo_datado))
+                try:
+                    # Criar cópia latest para facilitar acesso
+                    shutil.copy2(arquivo_datado, arquivo_latest)
+                except Exception as e:
+                    logging.warning("[REPORT] Erro ao criar cópia latest (não crítico): %s", e)
+
+        logging.info("[REPORT] Relatório Excel gerado: %s", arquivo_datado)
         return str(arquivo_datado)
         
     except Exception as e:

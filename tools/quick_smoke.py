@@ -1,6 +1,7 @@
 # quick smoke test for modified functions
 import sys
 import os
+import json
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
@@ -9,6 +10,9 @@ if ROOT not in sys.path:
 SHARED = os.path.join(ROOT, 'azure_functions', 'shared_code')
 if os.path.isdir(SHARED) and SHARED not in sys.path:
     sys.path.insert(0, SHARED)
+
+from azure_functions.shared_code.config.logging_config import setup_logger
+logger = setup_logger(__name__)
 
 import importlib.util
 
@@ -38,10 +42,9 @@ if __name__ == '__main__':
         'dataMeta': '2025-09-15'
     }
     resumo = resumir_detalhes_para_card(dummy_raw)
-    print('Resumo:', resumo)
+    logger.info(f'Resumo obtido: {resumo}')
 
     tarefa = {'id': '4.66030', 'nome': 'Obrigações Mensais', 'dataVencimento': '2025-09-20', 'status': 'A'}
     resp = {'nome': 'Joao'}
     card = create_task_notification_card(tarefa, resp, detalhes=resumo)
-    import json
-    print(json.dumps(card, ensure_ascii=False, indent=2))
+    logger.info(f'Card gerado:\n{json.dumps(card, ensure_ascii=False, indent=2)}')

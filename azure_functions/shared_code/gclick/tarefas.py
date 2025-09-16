@@ -2,6 +2,9 @@ import requests
 from datetime import datetime
 from typing import Tuple, List, Dict, Any, Iterable, Optional
 from .auth import get_access_token  # Usar auth centralizado
+from azure_functions.shared_code.config.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 # Carrega .env defensivamente (não falha se não existir)
 try:
@@ -52,7 +55,6 @@ def normalizar_tarefa(t: Dict[str, Any]) -> Dict[str, Any]:
         except ValueError:
             try:
                 # Tentar outros formatos comuns
-                from datetime import datetime
                 r["_dt_dataVencimento"] = datetime.strptime(dv[:10], "%Y-%m-%d").date()
             except ValueError:
                 print(f"[WARN] Formato de data não reconhecido: {dv}")
@@ -163,7 +165,7 @@ def listar_tarefas_abertas_intervalo(
             coletadas_st.extend(lst)
 
             if verbose:
-                print(f"[INFO] Status {st}: página={page} obtidas={len(lst)} totalPages={meta.get('totalPages')}")
+                logger.info(f"Status {st}: página {page}, obtidas {len(lst)} tarefas (totalPages: {meta.get('totalPages')})")
 
             if meta.get("last") is True:
                 break

@@ -2,6 +2,9 @@ import time
 import requests
 from typing import List, Dict, Any
 from .auth import get_access_token
+from azure_functions.shared_code.config.logging_config import setup_logger
+
+logger = setup_logger(__name__)
 
 def _headers():
     return {"Authorization": f"Bearer {get_access_token()}"}
@@ -32,30 +35,30 @@ def listar_responsaveis_tarefa(
                 data = resp.json()
                 if isinstance(data, list):
                     if verbose:
-                        print(f"[RESP] tarefa={tarefa_id} -> {len(data)} responsável(is).")
+                        logger.info(f"Tarefa {tarefa_id}: encontrado(s) {len(data)} responsável(is)")
                     return data
                 if verbose:
-                    print(f"[RESP][WARN] tarefa={tarefa_id} resposta não é lista. body={data}")
+                    logger.warning(f"Tarefa {tarefa_id}: resposta não é lista. body={data}")
                 return []
             elif resp.status_code == 500:
                 # Erro específico do servidor - não retry agressivo
                 if verbose:
-                    print(f"[RESP][500] tarefa={tarefa_id} - endpoint pode não existir ou tarefa inválida")
+                    logger.warning(f"Tarefa {tarefa_id}: endpoint pode não existir ou tarefa inválida (HTTP 500)")
                 return []
             elif resp.status_code == 404:
                 # Tarefa não encontrada ou sem responsáveis
                 if verbose:
-                    print(f"[RESP][404] tarefa={tarefa_id} - não encontrada ou sem responsáveis")
+                    logger.info(f"Tarefa {tarefa_id}: não encontrada ou sem responsáveis (HTTP 404)")
                 return []
             else:
                 if verbose:
-                    print(f"[RESP][HTTP {resp.status_code}] tarefa={tarefa_id} body={resp.text[:180]}")
+                    logger.warning(f"Tarefa {tarefa_id}: erro HTTP {resp.status_code} - {resp.text[:180]}")
         except (requests.Timeout, requests.ConnectionError) as e:
             if verbose:
-                print(f"[RESP][TIMEOUT/CONN] tarefa={tarefa_id} tent={attempt}/{retries} erro={e}")
+                logger.warning(f"Tarefa {tarefa_id}: timeout/erro conexão (tentativa {attempt}/{retries}) - {e}")
         except requests.RequestException as e:
             if verbose:
-                print(f"[RESP][EXC] tarefa={tarefa_id} tent={attempt}/{retries} erro={e}")
+                logger.warning(f"Tarefa {tarefa_id}: erro na requisição (tentativa {attempt}/{retries}) - {e}")
 
         # Não retry em erros definitivos (500, 404)
         if last_status_code in [500, 404]:
@@ -66,7 +69,7 @@ def listar_responsaveis_tarefa(
             time.sleep(sleep_for)
 
     if verbose:
-        print(f"[RESP][FAIL] tarefa={tarefa_id} após {attempt} tentativas (último status: {last_status_code}).")
+        logger.error(f"Tarefa {tarefa_id}: falha após {attempt} tentativas (último status: {last_status_code})")
     return []
 
 def normalizar_responsavel(raw: Dict[str, Any]) -> Dict[str, Any]:

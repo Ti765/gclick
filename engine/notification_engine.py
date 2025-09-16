@@ -5,7 +5,6 @@ import logging
 from datetime import date, timedelta
 from collections import defaultdict
 from typing import Dict, List, Any, Tuple, Optional
-import datetime as dt
 
 import yaml
 
@@ -13,37 +12,35 @@ from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
 from gclick.tarefas_detalhes import obter_tarefa_detalhes, resumir_detalhes_para_card
 from gclick.responsaveis import listar_responsaveis_tarefa
 from teams.webhook import enviar_teams_mensagem
-from teams.cards import create_task_notification_card
-from storage.state import already_sent, register_sent, purge_older_than
+from storage.state import purge_older_than
 # NOVA API: Idempotência granular
 from storage.state import (
-    get_global_state_storage, 
-    aplicar_filtro_idempotencia, 
+    get_global_state_storage,
+    aplicar_filtro_idempotencia,
     marcar_envios_bem_sucedidos,
-    criar_chave_idempotencia
+    criar_chave_idempotencia,
 )
 
-# Configurar logger
+# ===================== LOGGER =====================
 logger = logging.getLogger(__name__)
 
-# Imports P2: Cache e Resilience
+# ============ Resilience & Cache (opcional) ========
 try:
     from engine.cache import IntelligentCache
     from engine.resilience import resilient, resilience_manager
     HAS_RESILIENCE = True
-    # Instanciar cache global
     notification_cache = IntelligentCache(max_size=1000, default_ttl=300)
 except ImportError as e:
     logger.warning("Sistema de resilience não disponível: %s", e)
     HAS_RESILIENCE = False
     notification_cache = None
-    # Fallback decorator que não faz nada
+
     def resilient(service: str = "default", check_rate_limit: bool = True):
         def decorator(func):
             return func
         return decorator
 
-# Imports para funcionalidades avançadas
+# ======= Funcionalidades avançadas (opcional) ======
 try:
     from engine.classification import separar_tarefas_overdue, obter_data_atual_brt
     from reports.overdue_report import gerar_relatorio_excel_overdue
@@ -52,41 +49,52 @@ except ImportError as e:
     logger.warning("Funcionalidades avançadas não disponíveis: %s", e)
     HAS_ADVANCED_FEATURES = False
 
-# ================= HELPERS PARA ROBUSTEZ =================
+# ======= Deep-link G-Click (com fallback local) =====
+try:
+    # Preferência por helper compartilhado quando disponível neste ambiente
+    from utils.gclick_links import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO  # type: ignore
+except Exception:
+    EMPRESA_ID_PADRAO = int(os.getenv("GCLICK_EMPRESA_ID", "2557"))
 
-def _cached_listar_tarefas_page(categoria: str, page: int, size: int, 
-                               dataVencimentoInicio: str = None, 
-                               dataVencimentoFim: str = None):
+    def montar_link_gclick_obrigacao(task_id: str, empresa_id: int = EMPRESA_ID_PADRAO) -> str:
+        """
+        Fallback simples: tenta montar coListar.do quando id vem no formato 'X.YYYY'.
+        Caso contrário, usa link genérico (melhor do que quebrar).
+        """
+        tid = str(task_id or "").strip()
+        coid, eveid = None, None
+        if "." in tid:
+            left, right = tid.split(".", 1)
+            if left.isdigit() and right.isdigit():
+                coid, eveid = left, right
+        if coid and eveid:
+            return f"https://app.gclick.com.br/coListar.do?obj=coevento&coid={coid}&eveId={eveid}&empId={empresa_id}"
+        # fallback genérico
+        return f"https://app.gclick.com.br/tarefas/{tid}"
+
+# ==================== Helpers ======================
+
+def _cached_listar_tarefas_page(categoria: str, page: int, size: int,
+                                dataVencimentoInicio: str = None,
+                                dataVencimentoFim: str = None):
     """Wrapper com cache para listar_tarefas_page."""
     if not HAS_RESILIENCE or not notification_cache:
         return listar_tarefas_page(categoria, page, size, dataVencimentoInicio, dataVencimentoFim)
-    
-    # Criar chave de cache baseada nos parâmetros
+
     cache_key = f"tarefas:{categoria}:{page}:{size}:{dataVencimentoInicio}:{dataVencimentoFim}"
-    
-    # Tentar buscar do cache primeiro
     cached_result = notification_cache.get(cache_key)
     if cached_result is not None:
-        logger.debug("🎯 Cache HIT para tarefas (page=%d, size=%d)", page, size)
+        logger.debug("🎯 Cache HIT tarefas (page=%d, size=%d)", page, size)
         return cached_result
-    
-    # Se não está no cache, fazer chamada da API
-    try:
-        result = listar_tarefas_page(categoria, page, size, dataVencimentoInicio, dataVencimentoFim)
-        # Armazenar no cache com TTL menor para dados dinâmicos (5 minutos)
-        notification_cache.set(cache_key, result, ttl=300)
-        logger.debug("💾 Cache MISS para tarefas (page=%d, size=%d) - armazenado", page, size)
-        return result
-    except Exception as e:
-        logger.warning("❌ Falha ao buscar tarefas (page=%d, size=%d): %s", page, size, e)
-        raise
+
+    result = listar_tarefas_page(categoria, page, size, dataVencimentoInicio, dataVencimentoFim)
+    notification_cache.set(cache_key, result, ttl=300)
+    logger.debug("💾 Cache MISS tarefas (page=%d, size=%d) - armazenado", page, size)
+    return result
 
 
 def _cached_obter_detalhes(task_id: str, *, ttl: int = 600) -> Dict[str, Any]:
-    """
-    Busca detalhes da tarefa com cache (10 min por padrão).
-    Retorna um resumo já normalizado para o card.
-    """
+    """Busca detalhes da tarefa com cache (10 min por padrão) e retorna resumo para card."""
     if not HAS_RESILIENCE or not notification_cache:
         raw = obter_tarefa_detalhes(task_id)
         return resumir_detalhes_para_card(raw)
@@ -105,19 +113,16 @@ def _cached_obter_detalhes(task_id: str, *, ttl: int = 600) -> Dict[str, Any]:
         logger.debug("Falha ao setar cache detalhes %s", task_id, exc_info=True)
     return resumo
 
-@resilient(service="teams_bot", check_rate_limit=False)  # Rate limit separado do main cycle
+
+@resilient(service="teams_bot", check_rate_limit=False)
 async def _resilient_send_card(bot_sender, teams_id: str, card_payload: dict, fallback_text: str):
     """Wrapper com resilience para envio de cards."""
     if not HAS_RESILIENCE:
         return await bot_sender.send_card(teams_id, card_payload, fallback_text)
-    
-    try:
-        result = await bot_sender.send_card(teams_id, card_payload, fallback_text)
-        logger.debug("📤 Card enviado com sucesso para %s", teams_id)
-        return result
-    except Exception as e:
-        logger.warning("📤❌ Falha ao enviar card para %s: %s", teams_id, e)
-        raise
+    result = await bot_sender.send_card(teams_id, card_payload, fallback_text)
+    logger.debug("📤 Card enviado com sucesso para %s", teams_id)
+    return result
+
 
 def _ensure_card_payload(card) -> dict:
     """Garante que o payload do card seja dict (Teams/Bot esperam dict)."""
@@ -125,9 +130,20 @@ def _ensure_card_payload(card) -> dict:
         try:
             return json.loads(card)
         except Exception:
-            logging.warning("[CARD] Payload veio como string não-JSON; usando fallback.")
-            return {"type": "AdaptiveCard", "version": "1.3"}  # fallback mínimo
+            logging.warning("[CARD] Payload string não-JSON; usando fallback.")
+            return {"type": "AdaptiveCard", "version": "1.3"}
     return card
+
+
+def _run_coro_safely(coro):
+    """Executa uma coroutine em qualquer thread (cria loop se necessário)."""
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(coro)
+        return True
+    except RuntimeError:
+        return asyncio.run(coro)
 
 
 def _has_conversation(storage, user_id: str) -> bool:
@@ -135,7 +151,6 @@ def _has_conversation(storage, user_id: str) -> bool:
     if storage is None or not user_id:
         return False
 
-    # Tenta diferentes métodos do storage
     for method in ("get", "has", "exists", "contains"):
         if hasattr(storage, method):
             fn = getattr(storage, method)
@@ -143,9 +158,8 @@ def _has_conversation(storage, user_id: str) -> bool:
                 res = fn(user_id)
                 if isinstance(res, bool):
                     return res
-                return bool(res)  # get(...) pode retornar dict/ref
+                return bool(res)
             except TypeError:
-                # get(user_id, default)
                 try:
                     res = fn(user_id, None)  # type: ignore
                     return bool(res)
@@ -154,7 +168,6 @@ def _has_conversation(storage, user_id: str) -> bool:
             except Exception:
                 pass
 
-    # Fallback para atributos internos
     for attr in ("_conversations", "references", "_data"):
         if hasattr(storage, attr):
             raw = getattr(storage, attr)
@@ -162,31 +175,28 @@ def _has_conversation(storage, user_id: str) -> bool:
                 return user_id in raw
     return False
 
+
+# Métricas (fallbacks)
 try:
     from analytics.metrics import write_notification_cycle, new_run_id
-except ImportError:  # Fallback se ainda não implementado
+except ImportError:
     def write_notification_cycle(**_k):  # type: ignore
         pass
     def new_run_id(prefix: str = 'run'):  # type: ignore
         return f"{prefix}_dummy"
 
-# ================= INTEGRAÇÃO COM BOT ADAPTER =================
-# Tente importar o BotSender.
-bot_sender = None
 
+# =================== Integração Bot ==================
+bot_sender = None
 try:
-    # CORRIGIDO: Importar do módulo compartilhado correto
-    from teams.bot_sender import BotSender
+    # Não precisamos importar BotSender aqui; o function_app injeta bot_sender neste módulo.
     from teams.user_mapping import mapear_apelido_para_teams_id
-    import logging
-    logging.info("[ENGINE] Bot sender imports disponíveis")
+    logging.info("[ENGINE] Mapeador de usuário do Teams disponível")
 except ImportError as e:
-    # Se falhar, segue só com webhook (até ajustar)
-    import logging
-    logging.warning(f"[BOT] Falha ao importar BotSender: {e}")
-    
+    logging.warning(f"[BOT] Falha ao importar user_mapping: {e}")
     def mapear_apelido_para_teams_id(apelido: str):
         return None
+
 
 STATUS_ABERTOS = {"A", "P", "Q", "S"}
 ALERT_ZERO_ABERTOS_TO_TEAMS = os.getenv("ALERT_ZERO_ABERTOS_TO_TEAMS", "false").lower() in ("1", "true", "yes")
@@ -203,16 +213,9 @@ STATUS_LABEL_LOCAL = {
     "Q": "Solicitado (visão cliente)"
 }
 
-# =============================================================
-# Config
-# =============================================================
+# ====================== Config ======================
 
 def load_notifications_config(path="config/notifications.yaml") -> dict:
-    """
-    Carrega configurações de notificação com suporte a environment variables.
-    Environment variables têm precedência sobre o YAML.
-    """
-    # Configurações padrão
     default_config = {
         "dias_proximos": 3,
         "dias_proximos_morning": 3,
@@ -221,38 +224,34 @@ def load_notifications_config(path="config/notifications.yaml") -> dict:
         "max_responsaveis_lookup": 100,
         "usar_full_scan": True,
         "timezone": "America/Sao_Paulo",
-        "max_tarefas_por_responsavel": 5
+        "max_tarefas_por_responsavel": 5,
     }
-    
-    # Carregar YAML se existir
+
     yaml_config = {}
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 yaml_config = yaml.safe_load(f) or {}
-            logger.info("✅ Configurações YAML carregadas de %s", path)
+            logger.info("✅ Config YAML carregada de %s", path)
         except Exception as e:
             logger.warning("⚠️ Erro ao carregar YAML %s: %s", path, e)
-    
-    # Combinar configurações: padrão <- YAML <- env vars
+
     config = {**default_config, **yaml_config}
-    
-    # Environment variables têm precedência máxima
+
     env_mappings = {
         "DIAS_PROXIMOS": "dias_proximos",
-        "DIAS_PROXIMOS_MORNING": "dias_proximos_morning", 
+        "DIAS_PROXIMOS_MORNING": "dias_proximos_morning",
         "DIAS_PROXIMOS_AFTERNOON": "dias_proximos_afternoon",
         "PAGE_SIZE": "page_size",
         "MAX_RESPONSAVEIS_LOOKUP": "max_responsaveis_lookup",
         "USAR_FULL_SCAN": "usar_full_scan",
         "TIMEZONE": "timezone",
-        "MAX_TAREFAS_POR_RESPONSAVEL": "max_tarefas_por_responsavel"
+        "MAX_TAREFAS_POR_RESPONSAVEL": "max_tarefas_por_responsavel",
     }
-    
+
     for env_var, config_key in env_mappings.items():
         env_value = os.getenv(env_var)
         if env_value is not None:
-            # Converter tipos apropriados
             try:
                 if config_key in ["usar_full_scan"]:
                     config[config_key] = env_value.lower() in ("true", "1", "yes")
@@ -260,36 +259,27 @@ def load_notifications_config(path="config/notifications.yaml") -> dict:
                     config[config_key] = str(env_value)
                 else:
                     config[config_key] = int(env_value)
-                logger.info("🔧 Configuração %s sobrescrita por env var: %s", config_key, env_value)
+                logger.info("🔧 %s sobrescrito por env: %s", config_key, env_value)
             except ValueError as e:
-                logger.warning("⚠️ Valor inválido para %s: %s (%s)", env_var, env_value, e)
-    
-    logger.info("⚙️ Configurações finais: %s", {k: v for k, v in config.items() if "password" not in k.lower()})
+                logger.warning("⚠️ Valor inválido %s=%s (%s)", env_var, env_value, e)
+
+    logger.info("⚙️ Config finais: %s", {k: v for k, v in config.items() if "password" not in k.lower()})
     return config
 
-# =============================================================
-# Classificação Temporal
-# =============================================================
+
+# ================= Classificação Temporal ================
 
 def classificar(tarefa: Dict[str, Any], hoje: date, dias_proximos: int) -> Optional[str]:
-    """
-    Classifica uma tarefa usando a lógica padronizada do classification.py.
-    Mantém compatibilidade com a API interna existente.
-    """
     try:
-        # Usar a lógica padronizada de classification.py
         from engine.classification import classificar_tarefa_individual
         resultado = classificar_tarefa_individual(tarefa, hoje)
-        
-        # Mapear resultado padronizado para formato interno
         if resultado is None:
             return None
-        elif resultado == "vencidas":
+        if resultado == "vencidas":
             return "vencidas"
-        elif resultado == "vence_hoje":
+        if resultado == "vence_hoje":
             return "vence_hoje"
-        elif resultado == "vence_em_3_dias":
-            # Verificar se está dentro da janela de dias_proximos
+        if resultado == "vence_em_3_dias":
             dt_txt = tarefa.get("dataVencimento")
             if dt_txt:
                 try:
@@ -299,10 +289,8 @@ def classificar(tarefa: Dict[str, Any], hoje: date, dias_proximos: int) -> Optio
                 except Exception:
                     pass
             return None
-        else:
-            return resultado
+        return resultado
     except ImportError:
-        # Fallback para lógica interna se classification.py não disponível
         logger.warning("classification.py não disponível, usando lógica interna")
         dt_txt = tarefa.get("dataVencimento")
         if not dt_txt:
@@ -311,11 +299,8 @@ def classificar(tarefa: Dict[str, Any], hoje: date, dias_proximos: int) -> Optio
             dt_venc = date.fromisoformat(dt_txt)
         except Exception:
             return None
-        
-        # Aplicar regra de filtro: ignorar atrasos > 1 dia
         if dt_venc < hoje - timedelta(days=1):
             return None
-            
         if dt_venc < hoje:
             return "vencidas"
         if dt_venc == hoje:
@@ -324,9 +309,8 @@ def classificar(tarefa: Dict[str, Any], hoje: date, dias_proximos: int) -> Optio
             return "vence_em_3_dias"
         return None
 
-# =============================================================
-# Agrupamento por Responsável
-# =============================================================
+
+# ================= Agrupamento por Responsável ================
 
 def agrupar_por_responsavel(
     tarefas_relevantes: List[Dict[str, Any]],
@@ -357,9 +341,8 @@ def agrupar_por_responsavel(
                 print(f"[WARN] Falha ao buscar responsáveis tarefa={t_id}: {e}")
     return grupos
 
-# =============================================================
-# Formatação de Mensagens
-# =============================================================
+
+# ===================== Formatação de Mensagens =====================
 
 def formatar_mensagem_individual(apelido: str, buckets: Dict[str, List[Dict[str, Any]]], limite_detalhe: int = 5) -> Optional[str]:
     partes = ["*Resumo de obrigações*"]
@@ -367,7 +350,7 @@ def formatar_mensagem_individual(apelido: str, buckets: Dict[str, List[Dict[str,
     titulos = {
         "vencidas": "VENCIDAS",
         "vence_hoje": "Vencem HOJE",
-        "vence_em_3_dias": "Vencem em 3 dias"
+        "vence_em_3_dias": "Vencem em 3 dias",
     }
     total_listadas = 0
     for chave in ordem:
@@ -377,9 +360,11 @@ def formatar_mensagem_individual(apelido: str, buckets: Dict[str, List[Dict[str,
         partes.append(f"\n**{titulos[chave]} ({len(lista)})**")
         for i, t in enumerate(lista):
             if i < limite_detalhe:
+                tid = str(t.get("id"))
+                link = montar_link_gclick_obrigacao(tid, EMPRESA_ID_PADRAO)
                 partes.append(
-                    f"- [{t['id']}] {t.get('nome') or t.get('titulo') or 'Tarefa'} (venc: {t['dataVencimento']}) → "
-                    f"https://app.gclick.com.br/tarefas/{t['id']}"
+                    f"- [{tid}] {t.get('nome') or t.get('titulo') or 'Tarefa'} "
+                    f"(venc: {t.get('dataVencimento')}) → {link}"
                 )
             else:
                 partes.append(f"- {len(lista)-limite_detalhe} tarefa(s) adicionais.")
@@ -388,6 +373,7 @@ def formatar_mensagem_individual(apelido: str, buckets: Dict[str, List[Dict[str,
     if total_listadas == 0:
         return None
     return "\n".join(partes)
+
 
 def formatar_resumo_global(grupos_buckets: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> str:
     colaboradores = []
@@ -408,9 +394,8 @@ def formatar_resumo_global(grupos_buckets: Dict[str, Dict[str, List[Dict[str, An
         f"- Total de ocorrências (somando por responsável): **{total_ocorrencias}**"
     )
 
-# =============================================================
-# Coleta de Tarefas (Single Page ou Full Scan)
-# =============================================================
+
+# ===================== Coleta de Tarefas =====================
 
 def _coletar_tarefas_intervalo(
     categoria: str,
@@ -462,60 +447,52 @@ def _coletar_tarefas_intervalo(
             print(f"[COLETA] FULL SCAN total coletado={len(tarefas)} páginas={page}")
     return tarefas, meta_final
 
-# =============================================================
-# Núcleo do Ciclo de Notificação (Nova API)
-# =============================================================
+
+# ===================== Núcleo do Ciclo =====================
 
 @resilient(service="notification_cycle", check_rate_limit=True)
 def run_notification_cycle(
     *,
-    dias_proximos: int = None,  # Será definido por configuração se None
+    dias_proximos: int = None,
     categoria: str = "Obrigacao",
-    usar_full_scan: bool = None,  # Será definido por configuração se None
-    page_size: int = None,  # Será definido por configuração se None
+    usar_full_scan: bool = None,
+    page_size: int = None,
     max_pages: Optional[int] = None,
     apenas_status_abertos: bool = True,
-    max_responsaveis_lookup: int = None,  # Será definido por configuração se None
+    max_responsaveis_lookup: int = None,
     limite_responsaveis_notificar: int = 50,
-    detalhar_limite: int = None,  # Será definido por configuração se None
+    detalhar_limite: int = None,
     enviar_resumo_global: bool = True,
     rate_limit_sleep_ms: int = 0,
     repetir_no_mesmo_dia: bool = False,
-    execution_mode: str = 'dry_run',  # 'dry_run' ou 'live'
+    execution_mode: str = 'dry_run',
     run_id: Optional[str] = None,
     run_reason: str = 'manual',
     verbose: bool = False,
     registrar_metricas: bool = True,
     alertar_se_zero_abertos: bool = True,
+    timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Executa um ciclo de notificação e registra métricas padronizadas.
-    Retorna dicionário com estatísticas principais.
-    
-    MELHORIAS P1:
-    - Carrega configurações dinâmicas do YAML + env vars
-    - Suporte a configurações separadas morning/afternoon
-    - Corrige duplicação usando configuração baseada em contexto
-    """
+    # Backwards-compatible timeout kwarg accepted by wrappers; unused internally
+    if timeout is not None:
+        logging.warning("⚠️ Deprecation warning: 'timeout' kwarg is accepted for backwards compatibility.")
+
     start_ts = time.time()
     if run_id is None:
         run_id = new_run_id('notify')
 
-    # Carregar configurações dinâmicas
     config = load_notifications_config()
-    
-    # Detectar contexto baseado no run_reason para configurações específicas
+
     if run_reason.startswith("scheduled_morning"):
         dias_proximos_key = "dias_proximos_morning"
         context = "morning"
     elif run_reason.startswith("scheduled_afternoon"):
-        dias_proximos_key = "dias_proximos_afternoon"  
+        dias_proximos_key = "dias_proximos_afternoon"
         context = "afternoon"
     else:
         dias_proximos_key = "dias_proximos"
         context = "manual"
-    
-    # Aplicar configurações com fallbacks
+
     if dias_proximos is None:
         dias_proximos = config.get(dias_proximos_key, config.get("dias_proximos", 3))
     if usar_full_scan is None:
@@ -527,18 +504,16 @@ def run_notification_cycle(
     if detalhar_limite is None:
         detalhar_limite = config.get("max_tarefas_por_responsavel", 5)
 
-    logger.info("🎛️ Configurações aplicadas - contexto=%s, dias_proximos=%d, full_scan=%s",
+    logger.info("🎛️ Config aplicadas - contexto=%s, dias_proximos=%d, full_scan=%s",
                 context, dias_proximos, usar_full_scan)
 
-    # CORREÇÃO CRÍTICA: Usar timezone BRT e incluir 1 dia de atraso
     hoje = obter_data_atual_brt() if HAS_ADVANCED_FEATURES else date.today()
-    t_inicio = hoje - timedelta(days=1)  # ← CORREÇÃO: incluir tarefas vencidas ontem
+    t_inicio = hoje - timedelta(days=1)
     t_fim = hoje + timedelta(days=dias_proximos)
 
-    logger.info("🕒 Coletando tarefas de %s a %s (BRT) - inclui 1 dia atraso", t_inicio, t_fim)
-    logger.info("🔍 Janela: ontem + hoje + próximos %d dias (contexto: %s)", dias_proximos, context)
+    logger.info("🕒 Coletando tarefas de %s a %s (BRT – inclui 1 dia de atraso)", t_inicio, t_fim)
 
-    # 1. Coleta
+    # 1) Coleta
     tarefas, meta = _coletar_tarefas_intervalo(
         categoria=categoria,
         inicio=t_inicio,
@@ -548,48 +523,36 @@ def run_notification_cycle(
         max_pages=max_pages,
         verbose=verbose
     )
-
     if verbose:
         print(f"[DEBUG] Coletadas {len(tarefas)} tarefas (janela {t_inicio} -> {t_fim}) meta={meta}")
 
-    # 2. Filtragem status abertos (client-side)
-    if apenas_status_abertos:
-        tarefas_filtradas = [t for t in tarefas if t.get("status") in STATUS_ABERTOS]
-    else:
-        tarefas_filtradas = list(tarefas)
-
+    # 2) Filtro de status
+    tarefas_filtradas = [t for t in tarefas if t.get("status") in STATUS_ABERTOS] if apenas_status_abertos else list(tarefas)
     if verbose:
         print(f"[DEBUG] Após filtro status abertos={apenas_status_abertos}: {len(tarefas_filtradas)}")
 
-    # 3. Separação de tarefas normais e overdue (se disponível)
+    # 3) Overdue split (opcional)
     tarefas_normalizadas = [normalizar_tarefa(t) for t in tarefas_filtradas]
-    
     if HAS_ADVANCED_FEATURES:
         separacao = separar_tarefas_overdue(tarefas_normalizadas, hoje)
         tarefas_para_notificacao = separacao["normais"]
         tarefas_overdue = separacao["overdue"]
-        
-        # Gerar relatório Excel para tarefas com muito atraso
         if tarefas_overdue and execution_mode == 'live':
             try:
                 relatorio_path = gerar_relatorio_excel_overdue(
-                    tarefas_overdue, 
+                    tarefas_overdue,
                     output_dir="reports/exports",
                     hoje=hoje
                 )
-                logging.info("📊 Relatório Excel gerado: %s (%d tarefas)", 
-                           relatorio_path, len(tarefas_overdue))
+                logging.info("📊 Relatório Excel gerado: %s (%d tarefas)", relatorio_path, len(tarefas_overdue))
             except Exception as excel_err:
                 logging.error("❌ Falha ao gerar relatório Excel: %s", excel_err)
-        
         if verbose:
-            print(f"[DEBUG] Separação - Normais: {len(tarefas_para_notificacao)}, "
-                  f"Overdue: {len(tarefas_overdue)}")
+            print(f"[DEBUG] Separação - Normais: {len(tarefas_para_notificacao)}, Overdue: {len(tarefas_overdue)}")
     else:
         tarefas_para_notificacao = tarefas_normalizadas
-        tarefas_overdue = []
 
-    # 4. Classificação das tarefas normais
+    # 4) Classificação
     buckets_globais = {"vencidas": [], "vence_hoje": [], "vence_em_3_dias": []}
     for nt in tarefas_para_notificacao:
         cls = classificar(nt, hoje, dias_proximos)
@@ -598,12 +561,9 @@ def run_notification_cycle(
 
     relevantes = buckets_globais["vencidas"] + buckets_globais["vence_hoje"] + buckets_globais["vence_em_3_dias"]
     if verbose:
-        print("[INFO] Classificação:", {k: len(v) for k, v in buckets_globais.items()}, 
-              "relevantes=", len(relevantes))
-        if tarefas_overdue:
-            print(f"[INFO] Tarefas overdue (relatório): {len(tarefas_overdue)}")
+        print("[INFO] Classificação:", {k: len(v) for k, v in buckets_globais.items()}, "relevantes=", len(relevantes))
 
-    # 5. Agrupamento de responsáveis
+    # 5) Agrupamento por responsável
     grupos_resps = agrupar_por_responsavel(
         relevantes,
         max_responsaveis_lookup=max_responsaveis_lookup,
@@ -611,7 +571,7 @@ def run_notification_cycle(
         verbose=verbose
     )
 
-    # 5. Reclassificação por responsável (para contagens independentemente)
+    # 5b) Reclassificar por responsável
     grupos_buckets: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for apelido, tarefas_lista in grupos_resps.items():
         b = {"vencidas": [], "vence_hoje": [], "vence_em_3_dias": []}
@@ -629,17 +589,15 @@ def run_notification_cycle(
 
     purge_older_than(days=7)
 
-    # 6. NOVA IDEMPOTÊNCIA: Filtro granular por tarefa/responsável/dia
+    # 6) Idempotência granular
     state_storage = get_global_state_storage()
-    mensagens_enviadas: List[Tuple[str, str, str]] = []
-    envios_para_marcar: List[Tuple[str, bool]] = []
-    
+    mensagens_enviadas: List[Tuple[str, str, Dict[str, List[Tuple[Dict[str, Any], str]]]]] = []
+
     for apelido, bkt in responsaveis_ordenados:
         total_resp = sum(len(lst) for lst in bkt.values())
         if total_resp == 0:
             continue
-        
-        # APLICAR FILTRO GRANULAR: remove tarefas já enviadas hoje
+
         if not repetir_no_mesmo_dia:
             bkt_filtrado = aplicar_filtro_idempotencia(bkt, apelido, hoje, state_storage)
             if not bkt_filtrado:
@@ -647,70 +605,65 @@ def run_notification_cycle(
                     print(f"[SKIP] Todas as tarefas já foram notificadas hoje: {apelido}")
                 continue
         else:
-            # Se repetir_no_mesmo_dia=True, converte formato para compatibilidade
             bkt_filtrado = {
-                nome: [(tarefa, criar_chave_idempotencia(str(tarefa.get("id", "")), apelido, hoje)) 
+                nome: [(tarefa, criar_chave_idempotencia(str(tarefa.get("id", "")), apelido, hoje))
                        for tarefa in lista]
                 for nome, lista in bkt.items()
             }
-        
-        # Construir mensagem com tarefas filtradas
+
         bkt_para_msg = {nome: [item[0] for item in lista] for nome, lista in bkt_filtrado.items()}
         msg = formatar_mensagem_individual(apelido, bkt_para_msg, limite_detalhe=detalhar_limite)
         if not msg:
             continue
-            
-        # Preparar para envio
+
         mensagens_enviadas.append((apelido, msg, bkt_filtrado))
 
     resumo_global_msg = formatar_resumo_global(grupos_buckets) if enviar_resumo_global else None
 
-    # 7. Envio ou Dry-run
+    # 7) Envio
     if execution_mode == 'dry_run':
         print(f"[INFO] DRY-RUN run_id={run_id} – Mensagens preparadas:")
         if resumo_global_msg:
             print("----\n[RESUMO GLOBAL]\n" + resumo_global_msg)
-        for apelido, key, msg in mensagens_enviadas:
+        for apelido, msg, _bkt in mensagens_enviadas:
             print("----")
             print(f"[{apelido}]\n{msg}")
         print(f"[INFO] DRY-RUN concluído. (responsáveis selecionados={len(mensagens_enviadas)})")
     else:
-        # Primeiro, envia o resumo global (opcional)
         if resumo_global_msg:
             try:
                 if bot_sender:
-                    # Envie para um canal específico ou admin, se quiser, usando o bot.
-                    logging.info("[BOT] Resumo global pronto para envio (adapte para enviar em canal, se desejar).")
+                    logging.info("[BOT] Resumo global pronto para envio (adapte canal/alvo).")
                 else:
                     enviar_teams_mensagem(resumo_global_msg)
             except Exception as e:
                 print(f"[WARN] Falha envio resumo global: {e}")
-        
-        # Depois, envia individualmente com nova idempotência:
+
+        # Import tardio do card para evitar ciclos/ImportError prematuro
+        try:
+            from teams.cards import create_task_notification_card  # type: ignore
+        except Exception as imp_err:
+            logging.error("❌ Falha ao importar create_task_notification_card: %s", imp_err, exc_info=True)
+            create_task_notification_card = None  # type: ignore
+
         for apelido, msg, bkt_filtrado in mensagens_enviadas:
-            envios_realizados_responsavel = []
-            
+            envios_realizados_responsavel: List[Tuple[str, bool]] = []
             try:
                 mensagem_enviada = False
-                
-                # Tenta enviar via bot primeiro (se disponível)
+
                 if bot_sender:
                     teams_id = mapear_apelido_para_teams_id(apelido)
-                    if teams_id and _has_conversation(bot_sender.conversation_storage, teams_id):
+                    if teams_id and _has_conversation(getattr(bot_sender, "conversation_storage", None), teams_id):
                         try:
-                            # Enviar um card por tarefa com nova estrutura
-                            for categoria_urgencia, lista_tarefas_chaves in bkt_filtrado.items():
+                            for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
                                 for tarefa, chave in lista_tarefas_chaves:
                                     try:
-                                        # Dados do responsável para o card
                                         responsavel_dados = {"nome": apelido, "apelido": apelido}
-                                        
-                                        # Pré-carregar detalhes compactos (cache) e criar card
+
+                                        # Detalhes compactos
                                         task_id_txt = str(tarefa.get("id") or tarefa.get("taskId") or "")
-                                        detalhes_compactos = {}
-                                        # Limitar número de fetches reais por execução para evitar rate limits
+                                        detalhes_compactos: Dict[str, Any] = {}
                                         max_detalhes_per_run = int(os.getenv('MAX_DETALHES_FETCH_PER_RUN', '50'))
-                                        # contador no cache global opcional
                                         if not hasattr(run_notification_cycle, '_detalhes_fetches_done'):
                                             setattr(run_notification_cycle, '_detalhes_fetches_done', 0)
                                         done = getattr(run_notification_cycle, '_detalhes_fetches_done')
@@ -720,90 +673,79 @@ def run_notification_cycle(
                                                 setattr(run_notification_cycle, '_detalhes_fetches_done', done + 1)
                                             except Exception as e_det:
                                                 logging.warning("[DETALHES] Falha ao obter detalhes %s: %s", task_id_txt, e_det)
-                                                detalhes_compactos = {}
-                                        else:
-                                            logging.debug("[DETALHES] Limite de fetch por run atingido (%s). Pulando fetch para %s", max_detalhes_per_run, task_id_txt)
-                                            detalhes_compactos = {}
 
-                                        # Criar card da tarefa (passando detalhes compactos)
-                                        card_json_str = create_task_notification_card(tarefa, responsavel_dados, detalhes=detalhes_compactos)
-                                        card_payload = _ensure_card_payload(card_json_str)
-                                        
-                                        # Texto de fallback
+                                        # Monta card (se disponível)
+                                        if create_task_notification_card:
+                                            card_payload = _ensure_card_payload(
+                                                create_task_notification_card(tarefa, responsavel_dados, detalhes=detalhes_compactos)  # type: ignore
+                                            )
+                                        else:
+                                            # Fallback: mensagem simples
+                                            card_payload = {
+                                                "type": "AdaptiveCard", "version": "1.3",
+                                                "body": [{"type": "TextBlock", "text": msg, "wrap": True}]
+                                            }
+
                                         fallback_text = (
                                             f"🔔 Obrigação: {tarefa.get('nome', 'Sem nome')} "
                                             f"(Venc: {tarefa.get('dataVencimento', 'N/A')})"
                                         )
-                                        
-                                        # Enviar card de forma assíncrona com resilience
-                                        import asyncio
-                                        loop = asyncio.get_event_loop()
-                                        if loop.is_running():
-                                            asyncio.ensure_future(_resilient_send_card(bot_sender, teams_id, card_payload, fallback_text))
-                                        else:
-                                            loop.run_until_complete(_resilient_send_card(bot_sender, teams_id, card_payload, fallback_text))
-                                        
-                                        # Marcar como enviado com sucesso
+
+                                        _run_coro_safely(_resilient_send_card(bot_sender, teams_id, card_payload, fallback_text))
+
                                         envios_realizados_responsavel.append((chave, True))
                                         logging.info(f"[BOT-CARD] ✅ Enviado para {apelido} (tarefa: {tarefa.get('id')})")
-                                        
                                     except Exception as card_error:
                                         envios_realizados_responsavel.append((chave, False))
                                         logging.warning(f"[BOT-CARD] ❌ Falha para {apelido} tarefa {tarefa.get('id')}: {card_error}")
-                            
-                            mensagem_enviada = True
-                            logging.info(f"[BOT] ✅ Cards enviados para {apelido} (teams_id: {teams_id})")
+
+                            mensagem_enviada = any(sucesso for _, sucesso in envios_realizados_responsavel)
+                            sucessos = sum(1 for _, sucesso in envios_realizados_responsavel if sucesso)
+                            total = len(envios_realizados_responsavel)
+                            if sucessos > 0:
+                                logging.info(f"[BOT] ✅ {sucessos}/{total} cards enviados para {apelido} (teams_id: {teams_id})")
+                            else:
+                                logging.warning(f"[BOT] ❌ Nenhum card enviado via bot para {apelido}")
                         except Exception as bot_error:
                             logging.warning(f"[BOT] ❌ Falha geral para {apelido}: {bot_error}")
-                
-                # Fallback para webhook se bot falhou ou não está disponível
+
                 if not mensagem_enviada:
                     try:
                         enviar_teams_mensagem(f"{apelido}:\n{msg}")
-                        # Se webhook teve sucesso, marcar todas as chaves como enviadas
-                        for categoria_urgencia, lista_tarefas_chaves in bkt_filtrado.items():
-                            for tarefa, chave in lista_tarefas_chaves:
+                        for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                            for _tarefa, chave in lista_tarefas_chaves:
                                 envios_realizados_responsavel.append((chave, True))
                         logging.info(f"[WEBHOOK] ✅ Enviado para {apelido}")
                     except Exception as webhook_error:
                         logging.error(f"[WEBHOOK] ❌ Falha para {apelido}: {webhook_error}")
-                        # Marcar como falha
-                        for categoria_urgencia, lista_tarefas_chaves in bkt_filtrado.items():
-                            for tarefa, chave in lista_tarefas_chaves:
+                        for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                            for _tarefa, chave in lista_tarefas_chaves:
                                 envios_realizados_responsavel.append((chave, False))
-                
-                # NOVA LÓGICA: Marcar como enviado apenas os sucessos
+
                 marcar_envios_bem_sucedidos(envios_realizados_responsavel, state_storage)
-                
+
                 if verbose:
                     sucessos = sum(1 for _, sucesso in envios_realizados_responsavel if sucesso)
                     total = len(envios_realizados_responsavel)
                     print(f"[ENVIADO] {apelido} - {sucessos}/{total} tarefas enviadas com sucesso")
-                    
-                if rate_limit_sleep_ms > 0:
-                    time.sleep(rate_limit_sleep_ms / 1000.0)
-                    
-            except Exception as e:
-                print(f"[ERRO_ENVIO] {apelido}: {e}")
-                logging.error(f"[ERRO_ENVIO] {apelido}: {e}")
-                # Em caso de erro geral, marcar todas como falha
-                for categoria_urgencia, lista_tarefas_chaves in bkt_filtrado.items():
-                    for tarefa, chave in lista_tarefas_chaves:
-                        envios_realizados_responsavel.append((chave, False))
-                if verbose:
-                    print(f"[ENVIADO] {apelido} ({key})")
-                if rate_limit_sleep_ms > 0:
-                    time.sleep(rate_limit_sleep_ms / 1000.0)
-            except Exception as e:
-                print(f"[ERRO_ENVIO] {apelido}: {e}")
-                logging.error(f"[ERRO_ENVIO] {apelido}: {e}")
 
-    # 8. Estatísticas finais
+                if rate_limit_sleep_ms > 0:
+                    time.sleep(rate_limit_sleep_ms / 1000.0)
+
+            except Exception as e:
+                logging.error(f"[ERRO_ENVIO] {apelido}: {e}", exc_info=True)
+                for _categoria, lista_tarefas_chaves in bkt_filtrado.items():
+                    for _tarefa, chave in lista_tarefas_chaves:
+                        envios_realizados_responsavel.append((chave, False))
+                if rate_limit_sleep_ms > 0:
+                    time.sleep(rate_limit_sleep_ms / 1000.0)
+
+    # 8) Estatísticas finais
     counts_final = {
         "vencidas": len(buckets_globais["vencidas"]),
         "vence_hoje": len(buckets_globais["vence_hoje"]),
         "vence_em_3_dias": len(buckets_globais["vence_em_3_dias"]),
-        "responsaveis_selecionados": len(mensagens_enviadas)
+        "responsaveis_selecionados": len(mensagens_enviadas),
     }
 
     total_abertos_brutos = sum(1 for t in tarefas if t.get("status") in STATUS_ABERTOS)
@@ -812,7 +754,6 @@ def run_notification_cycle(
 
     duration = round(time.time() - start_ts, 2)
 
-    # 9. Métricas padronizadas
     if registrar_metricas:
         stats = {
             'tasks_total_raw': len(tarefas),
@@ -826,7 +767,7 @@ def run_notification_cycle(
         responsaveis_stats = {
             'total_distintos': len(grupos_buckets),
             'notificados_individuais': len(mensagens_enviadas),
-            'supervisores_resumo': 1,  # Ajustar quando houver hierarquia real
+            'supervisores_resumo': 1,
         }
         limits_stats = {
             'responsaveis_limit_reached': len(grupos_buckets) > limite_responsaveis_notificar,
@@ -842,10 +783,9 @@ def run_notification_cycle(
             extra={'reason': run_reason, 'full_scan': usar_full_scan}
         )
 
-    # 10. Alerta zero abertos
     if alertar_se_zero_abertos and zero_abertos:
-        msg_warn = (f"[WARN] Nenhuma tarefa aberta detectada na janela {t_inicio}->{t_fim} "
-                    f"(coletadas={len(tarefas)}). Pode ser período pós-fechamento.")
+        msg_warn = (f"[WARN] Nenhuma tarefa aberta na janela {t_inicio}->{t_fim} "
+                    f"(coletadas={len(tarefas)}).")
         print(msg_warn)
         if ALERT_ZERO_ABERTOS_TO_TEAMS and execution_mode == 'live':
             try:
@@ -875,9 +815,8 @@ def run_notification_cycle(
         "total_raw": len(tarefas),
     }
 
-# =============================================================
-# Wrapper de Compatibilidade (API antiga)
-# =============================================================
+
+# ================== Wrappers de compat ==================
 
 def ciclo_notificacao(
     dias_proximos: int = 3,
@@ -896,7 +835,7 @@ def ciclo_notificacao(
     alertar_se_zero_abertos: bool = True,
     usar_full_scan: bool = True,
     max_pages: Optional[int] = None,
-    apenas_status_abertos: bool = True,  # alias para considerar_somente_abertos
+    apenas_status_abertos: bool = True,
     **_unused,
 ) -> Dict[str, Any]:
     return run_notification_cycle(
@@ -921,15 +860,6 @@ def ciclo_notificacao(
 
 
 def run_cycle(simulacao: bool = False):
-    """
-    Wrapper para compatibilidade com Azure Function.
-    
-    Args:
-        simulacao: Se True, executa em modo dry_run sem enviar notificações reais
-        
-    Returns:
-        Dict com resultados do ciclo de notificação
-    """
     modo = "dry_run" if simulacao else "live"
     return run_notification_cycle(
         execution_mode=modo,
