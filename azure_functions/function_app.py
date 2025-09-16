@@ -306,28 +306,77 @@ def run_async(coro):
         return loop.run_until_complete(coro)
 
 def _run_cycle(period: str, dias_proximos: int, full_scan: bool):
+    """
+    Função central que executa um ciclo de notificações com retentativas.
+    
+    Args:
+        period: Identificador do ciclo ("morning", "afternoon", "manual")
+        dias_proximos: Quantos dias à frente verificar
+        full_scan: Se True, verifica todas as tarefas. Se False, apenas próximas do vencimento.
+        
+    Returns:
+        dict: Resultado da execução com status e detalhes
+    """
     if not FEATURES["notification_engine"]:
         logger.info("⏭️  Notification engine desabilitado via feature flag")
         return {"status": "disabled", "period": period}
-    
-    if import_style == "degraded":
-        logger.warning("⏭️  Notification engine não disponível - modo degradado")
-        return {"status": "degraded", "period": period, "message": "Imports falharam"}
+
+    max_attempts = CONFIG["max_retries"]
+    timeout = CONFIG["notification_timeout"]  
+
+    try:    
+        # Lazy import para evitar deadlock de imports circulares
+        from shared_code.engine.notification_engine import run_notification_cycle
         
-    # Modo produção por padrão - apenas dry_run se explicitamente configurado
-    exec_mode = "dry_run" if os.getenv("SIMULACAO", "false").lower() == "true" else "live"
-    logger.info("⏳  run_notification_cycle(%s) → modo=%s, dias=%s, timezone=%s", 
-               period, exec_mode, dias_proximos, CONFIG["timezone"])
-    
-    result = run_notification_cycle(
-        dias_proximos=dias_proximos,
-        execution_mode=exec_mode,
-        run_reason=f"scheduled_{period}",
-        usar_full_scan=full_scan,
-        apenas_status_abertos=True,
-    )
-    logger.info("✅  Ciclo %s concluído → %s", period, result)
-    return result
+        # Modo produção por padrão - apenas dry_run se explicitamente configurado
+        exec_mode = "dry_run" if os.getenv("SIMULACAO", "false").lower() == "true" else "live"
+        logger.info("⏳  run_notification_cycle(%s) → modo=%s, dias=%s, timezone=%s", 
+                   period, exec_mode, dias_proximos, CONFIG["timezone"])
+
+        # Loop de retentativas com backoff exponencial
+        import time
+        result = None
+        last_error = None
+        
+        for attempt in range(max_attempts):
+            try:
+                result = run_notification_cycle(
+                    dias_proximos=dias_proximos,
+                    execution_mode=exec_mode,
+                    run_reason=f"scheduled_{period}",
+                    usar_full_scan=full_scan,
+                    apenas_status_abertos=True,
+                    timeout=timeout
+                )
+                logger.info("✅  Ciclo %s concluído → %s", period, result)
+                return result
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts - 1:  # não esperar na última tentativa
+                    delay = min(2 ** attempt, 60)  # backoff exponencial, max 60s
+                    logger.warning("⚠️  Tentativa %d falhou, aguardando %ds: %s", 
+                                 attempt + 1, delay, e)
+                    time.sleep(delay)
+                else:
+                    logger.error("❌  Todas as %d tentativas falharam", max_attempts)
+                    break
+                    
+        # Se chegou aqui, todas as tentativas falharam
+        return {
+            "status": "error",
+            "period": period,
+            "error": str(last_error),
+            "attempts": max_attempts
+        }
+                
+    except ImportError as import_err:
+        logger.error("❌ Import run_notification_cycle falhou: %s", import_err)
+        return {
+            "status": "import_failed",
+            "period": period,
+            "error": str(import_err)
+        }
 
 # ─────────────────────────────────────────────────────────────
 # HTTP — Webhook G‑Click

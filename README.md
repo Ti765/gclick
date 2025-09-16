@@ -750,18 +750,47 @@ python status_dashboard.py
 ╚════════════════════════════════════════╝
 ```
 
-### **🆕 Logs Estruturados**
+### **🆕 Sistema de Logging Estruturado**
 
 ```python
-# Logs específicos para Adaptive Cards
+# Configuração do Logger
+from config.logging_config import setup_logger
+logger = setup_logger(__name__)
+
+# Níveis de Log
+logger.debug("Informação detalhada para debugging")
+logger.info("Informação geral sobre operações")
+logger.warning("Alertas que não impedem a execução")
+logger.error("Erros que podem afetar funcionalidades")
+
+# Logs estruturados por área:
+# Engine de Notificação
+logger.info("[ENGINE] Iniciando ciclo de notificações")
+logger.info("[ENGINE] Coletadas %d tarefas na janela %s -> %s", total, inicio, fim)
+logger.warning("[ENGINE] Falha ao processar tarefa %s: %s", task_id, error)
+
+# Adaptive Cards e Teams
 logger.info("[BOT-CARD] Enviado para %s (tarefa: %s)", apelido, tarefa_id)
 logger.info("[ACTION] Ação '%s' processada para task %s", action, task_id)
-logger.info("[DISPENSAR] Tarefa %s dispensada no G-Click com sucesso", task_id)
+logger.info("[DISPENSAR] Tarefa %s dispensada com sucesso", task_id)
 
-# Logs de compatibilidade
-logger.info("[COMPAT] Formato detectado: %s", formato_payload)
-logger.info("[FALLBACK] Usando token GCLICK_TOKEN (OAuth indisponível)")
+# Integração G-Click
+logger.info("[GCLICK] Obtidos %d responsáveis para tarefa %s", num_resp, task_id)
+logger.warning("[GCLICK] Falha na comunicação: %s. Usando fallback...", error)
+
+# Configuração por ambiente:
+GCLICK_LOG_LEVEL = {
+    'production': 'INFO',  # Apenas informações essenciais
+    'staging': 'DEBUG',    # Detalhes para testes
+    'development': 'DEBUG' # Máximo de informação
+}
 ```
+
+O sistema de logging foi projetado para:
+- **Consistência**: Formato padronizado em todo código
+- **Rastreabilidade**: Área/módulo identificado em cada log
+- **Performance**: Configurável por ambiente via GCLICK_LOG_LEVEL
+- **Compatibilidade**: Integrado com Azure Functions Monitor
 
 ## ⚙️ Configurações
 

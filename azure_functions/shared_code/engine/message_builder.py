@@ -2,7 +2,7 @@ from typing import List, Dict
 from datetime import date
 
 # Usar helper para gerar deep-link do G-Click
-from utils.gclick_links import montar_link_gclick_obrigacao
+from azure_functions.shared_code.utils.gclick_links import montar_link_gclick_obrigacao
 
 def _linha_tarefa(t):
     return f"- [{t.get('id')}] {t.get('nome')} (venc: {t.get('dataVencimento')}) → {montar_link_gclick_obrigacao(t.get('id'))}"

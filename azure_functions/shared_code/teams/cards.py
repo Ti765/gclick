@@ -10,8 +10,8 @@ Módulo para criação de cartões adaptativos (Adaptive Cards) para o Teams.
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, date
 
-# Import absoluto (robusto no Azure e local)
-from azure_functions.shared_code.utils.gclick_links import (
+# Import relativo ao shared_code
+from utils.gclick_links import (
     montar_link_gclick_obrigacao,
     EMPRESA_ID_PADRAO,
 )
