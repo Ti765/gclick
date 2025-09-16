@@ -94,9 +94,9 @@ class BotSender:
                     response = await turn_context.send_activity(message)
 
                 # Tentar gravar o id da activity no conversation_storage se disponível
-                if response and hasattr(response, 'id') and response.id and self.conversation_storage:
-                    # Normalizar storage para suportar dict ou objeto com .references
-                    try:
+                try:
+                    if response and hasattr(response, 'id') and response.id and self.conversation_storage:
+                        # Normalizar storage para suportar dict ou objeto com .references
                         # Se for dict-like storage (ConversationReferenceStorage in this module)
                         if hasattr(self.conversation_storage, 'references') and isinstance(self.conversation_storage.references, dict):
                             existing = self.conversation_storage.references.get(user_id, {})
@@ -107,10 +107,13 @@ class BotSender:
                                 self.conversation_storage.references[user_id] = existing
                                 # tentar persistir
                                 if hasattr(self.conversation_storage, 'save'):
-                                    self.conversation_storage.save()
-                    except Exception:
-                        # Não obrigar a persistência se falhar
-                        self.logger.debug("Não foi possível salvar last_activity no storage para %s", user_id, exc_info=True)
+                                    try:
+                                        self.conversation_storage.save()
+                                    except Exception:
+                                        self.logger.debug("Falha ao salvar conversation_storage após atualizar last_activity", exc_info=True)
+                except Exception:
+                    # Não obrigar a persistência se falhar
+                    self.logger.debug("Não foi possível salvar last_activity no storage para %s", user_id, exc_info=True)
                 
             # Continua a conversa usando a referência armazenada
             await self.adapter.continue_conversation(cref, _send_callback, self.app_id)

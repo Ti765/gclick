@@ -239,6 +239,16 @@ def load_notifications_config(path="config/notifications.yaml") -> dict:
 
     config = {**default_config, **yaml_config}
 
+    # Detect common typos / unknown keys and warn developers early.
+    expected_top_keys = {"notifications", "defaults"}
+    unknown = set(yaml_config.keys()) - expected_top_keys
+    if unknown:
+        logging.warning(
+            "Config de notificações contém chaves desconhecidas: %s. "
+            "Verifique por erros de digitação como 'dias_proxximos' (deveria ser 'dias_proximos').",
+            ", ".join(sorted(unknown)),
+        )
+
     env_mappings = {
         "DIAS_PROXIMOS": "dias_proximos",
         "DIAS_PROXIMOS_MORNING": "dias_proximos_morning",
@@ -601,7 +611,7 @@ def run_notification_cycle(
             bkt_filtrado = aplicar_filtro_idempotencia(bkt, apelido, hoje, state_storage)
             if not bkt_filtrado:
                 if verbose:
-                    print(f"[SKIP] Todas as tarefas já foram notificadas hoje: {apelido}")
+                    logger.debug("[SKIP] Todas as tarefas já foram notificadas hoje: %s", apelido)
                 continue
         else:
             bkt_filtrado = {
@@ -621,22 +631,22 @@ def run_notification_cycle(
 
     # 7) Envio
     if execution_mode == 'dry_run':
-        print(f"[INFO] DRY-RUN run_id={run_id} – Mensagens preparadas:")
+        logger.info("DRY-RUN run_id=%s – Mensagens preparadas", run_id)
         if resumo_global_msg:
-            print("----\n[RESUMO GLOBAL]\n" + resumo_global_msg)
+            logger.info("[RESUMO GLOBAL]\n%s", resumo_global_msg)
         for apelido, msg, _bkt in mensagens_enviadas:
-            print("----")
-            print(f"[{apelido}]\n{msg}")
-        print(f"[INFO] DRY-RUN concluído. (responsáveis selecionados={len(mensagens_enviadas)})")
+            logger.info("----")
+            logger.info("[%s]\n%s", apelido, msg)
+        logger.info("DRY-RUN concluído. (responsáveis selecionados=%d)", len(mensagens_enviadas))
     else:
         if resumo_global_msg:
             try:
                 if bot_sender:
-                    logging.info("[BOT] Resumo global pronto para envio (adapte canal/alvo).")
+                    logger.info("[BOT] Resumo global pronto para envio (adapte canal/alvo).")
                 else:
                     enviar_teams_mensagem(resumo_global_msg)
             except Exception as e:
-                print(f"[WARN] Falha envio resumo global: {e}")
+                logger.warning("Falha envio resumo global: %s", e)
 
         # Import tardio do card para evitar ciclos/ImportError prematuro
         try:
@@ -726,7 +736,7 @@ def run_notification_cycle(
                 if verbose:
                     sucessos = sum(1 for _, sucesso in envios_realizados_responsavel if sucesso)
                     total = len(envios_realizados_responsavel)
-                    print(f"[ENVIADO] {apelido} - {sucessos}/{total} tarefas enviadas com sucesso")
+                    logger.debug("[ENVIADO] %s - %d/%d tarefas enviadas com sucesso", apelido, sucessos, total)
 
                 if rate_limit_sleep_ms > 0:
                     time.sleep(rate_limit_sleep_ms / 1000.0)
