@@ -67,7 +67,7 @@ def mapear_apelido_para_teams_id(apelido: str) -> Optional[str]:
             logger.info(f"🧪 [TEST_MODE] Redirecionando '{apelido}' para {test_user_name} ({test_user_id})")
             return test_user_id
         else:
-            logger.error(f"❌ [TEST_MODE] Ativo mas TEST_USER_TEAMS_ID não configurado!")
+            logger.error("❌ [TEST_MODE] Ativo mas TEST_USER_TEAMS_ID não configurado!")
             return None
     
     # Verificar primeiro no mapeamento fixo

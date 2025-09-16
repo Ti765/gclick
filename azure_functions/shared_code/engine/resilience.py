@@ -9,11 +9,8 @@ import os
 import logging
 import asyncio
 import time
-import random
-import functools
 from functools import wraps
-from typing import List, Tuple, Callable, Any, Optional, Union
-from datetime import datetime, timedelta
+from typing import List, Tuple, Callable, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -511,7 +508,7 @@ def resilient(service: str = "default", check_rate_limit: bool = True):
                 result = func(*args, **kwargs)
                 resilience_manager.on_success(service)
                 return result
-            except Exception as e:
+            except Exception:
                 resilience_manager.on_failure(service)
                 raise
         return wrapper

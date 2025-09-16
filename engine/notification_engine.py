@@ -171,17 +171,13 @@ except ImportError:  # Fallback se ainda não implementado
         return f"{prefix}_dummy"
 
 # ================= INTEGRAÇÃO COM BOT ADAPTER =================
-# Tente importar o adapter, conversation_references e BotSender.
+# Tente importar o BotSender.
 bot_sender = None
-adapter = None
-conversation_references = None
 
 try:
     # CORRIGIDO: Importar do módulo compartilhado correto
     from teams.bot_sender import BotSender
     from teams.user_mapping import mapear_apelido_para_teams_id
-    # Note: adapter e conversation_references serão definidos pela function_app.py
-    # quando o bot estiver ativo. Por enquanto, manteremos como None.
     import logging
     logging.info("[ENGINE] Bot sender imports disponíveis")
 except ImportError as e:

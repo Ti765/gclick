@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import requests
 from typing import Optional
 from .auth import get_access_token

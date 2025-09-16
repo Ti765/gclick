@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Callable, Union
+from typing import List, Dict, Any, Callable
 from config.loader import load_config
 
 def _match_responsavel(responsavel: Dict[str, Any], wl_normalizada) -> bool:
@@ -52,7 +52,4 @@ def resolver_responsaveis_para_tarefa(
                 "_forcado": True
             }]
 
-    # Limite (segurança)
-    limite = notif.get("limites", {}).get("max_tarefas_por_responsavel", 50)
-    # Neste ponto não há relação 1-1 tarefa/responsável, limit não se aplica diretamente.
     return base

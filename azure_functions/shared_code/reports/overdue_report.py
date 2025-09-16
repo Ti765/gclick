@@ -59,7 +59,6 @@ def gerar_relatorio_excel_overdue(tarefas_atrasadas: list, output_dir: str | Non
     try:
         # Import preguiçoso para não punir cold start quando não precisa
         import pandas as pd  # type: ignore
-        from openpyxl import Workbook  # noqa: F401
 
         out_dir = _resolve_reports_dir(output_dir)
         if hoje is None:

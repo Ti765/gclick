@@ -19,6 +19,12 @@ aiohttp>=3.8.1
 # Logging e utilitários
 python-json-logger>=2.0.0
 
+# Dependências opcionais para relatórios - não são necessárias em runtime se os
+# módulos de relatório não forem utilizados. Adicione em requirements-dev.txt se quiser
+# ter disponível para desenvolvimento.
+# pandas>=2.0.0  # Necessário para gerar relatórios em excel
+# openpyxl>=3.0.0  # Necessário para pandas exportar em xlsx
+
 # Werkzeug para compatibilidade (removido para reduzir memory footprint)
 # werkzeug~=3.1.3
 

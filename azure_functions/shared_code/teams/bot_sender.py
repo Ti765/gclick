@@ -1,12 +1,11 @@
 import os
 import json
 import logging
-import asyncio
 from typing import Optional, Union
 from pathlib import Path
 from datetime import datetime
 
-from botbuilder.core import BotFrameworkAdapter, TurnContext
+from botbuilder.core import TurnContext
 from botbuilder.schema import Activity, ConversationReference, Attachment
 from botframework.connector.auth import MicrosoftAppCredentials
 

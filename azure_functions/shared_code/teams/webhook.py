@@ -17,7 +17,7 @@ def enviar_teams_mensagem(texto: str, max_retries: int = 3, backoff: float = 1.5
             if resp.status_code >= 400:
                 raise RuntimeError(f"HTTP {resp.status_code} -> {resp.text[:300]}")
             return resp.text
-        except Exception as e:
+        except Exception:
             if tentativa >= max_retries:
                 raise
             time.sleep(backoff * tentativa)

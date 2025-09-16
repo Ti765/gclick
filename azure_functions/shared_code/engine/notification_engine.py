@@ -11,13 +11,12 @@ from typing import Dict as TDict
 MensagensBucket = TDict[str, List[Tuple[Dict[str, Any], str]]]
 
 import yaml
-import re
 
 from gclick.tarefas import listar_tarefas_page, normalizar_tarefa
 from gclick.responsaveis import listar_responsaveis_tarefa
 from teams.webhook import enviar_teams_mensagem
 # IMPORT DO CARD MOVIDO PARA MODO LATE-IMPORT para evitar ciclo de import
-from utils.gclick_links import montar_link_gclick_obrigacao, EMPRESA_ID_PADRAO
+from utils.gclick_links import montar_link_gclick_obrigacao
 from storage.state import purge_older_than
 # NOVA API: Idempotência granular
 from storage.state import (
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Imports P2: Cache e Resilience
 try:
     from engine.cache import IntelligentCache
-    from engine.resilience import resilient, resilience_manager
+    from engine.resilience import resilient
     HAS_RESILIENCE = True
     # Instanciar cache global
     notification_cache = IntelligentCache(max_size=1000, default_ttl=300)
@@ -171,7 +170,6 @@ conversation_references = None
 
 try:
     # CORRIGIDO: Importar do módulo compartilhado correto
-    from teams.bot_sender import BotSender
     from teams.user_mapping import mapear_apelido_para_teams_id
     # Note: adapter e conversation_references serão definidos pela function_app.py
     # quando o bot estiver ativo. Por enquanto, manteremos como None.

@@ -1,7 +1,7 @@
 import os
 import time
 from pathlib import Path
-from typing import Optional
+
 
 class FileLock:
     """Lock simples baseado em arquivo para evitar execuções concorrentes.

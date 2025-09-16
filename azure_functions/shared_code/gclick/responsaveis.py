@@ -1,7 +1,6 @@
-import os
 import time
 import requests
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from .auth import get_access_token
 
 def _headers():
